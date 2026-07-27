@@ -15,6 +15,7 @@ Who does what
 | Area | You | Claude Code |
 | --- | --- | --- |
 | Accounts and credentials | Create everything, paste into .env | Reads from environment, never sees the values in chat |
+| MacroLog, including HealthBridge | All of it; it is a separate app on the phone | Nothing. It is outside this repository and outside the phase plan |
 | Homelab infrastructure | Docker host, tunnel, DNS name, backups | Writes the compose file and Dockerfiles |
 | Database | Nothing; it runs in the stack | Schema, migrations, seed scripts |
 | Application | Direct and review | All of it |
@@ -76,7 +77,8 @@ Roughly 10 minutes
 Roughly 5 minutes
 
 * Create a key scoped to this project so its spend is separable.
-* Set a monthly budget alert. The nightly consolidation is the largest single cost and you want to see it move.
+* Set a monthly budget alert at the provider. This is an alert, not a stop.
+* The hard stop is separate and lives in the coach: OBS-07 halts model calls for the day once a daily cap is hit, and says so rather than going silent. Both figures are open item 7 in the PRD and need setting before P12. The nightly consolidation is the largest single cost and you want to see it move.
 
 ### Step 6: intervals.icu API and webhook
 
@@ -85,7 +87,7 @@ Roughly 15 minutes
 * Copy your athlete id and API key from the intervals.icu settings page into .env. Key based auth, so no OAuth flow and no token refresh to maintain.
 * Register a webhook pointing at your tunnel hostname for activity uploads, and store the signing secret.
 * Confirm both connections are live on the platform side: Zwift feeding activities, Whoop feeding wellness.
-* Check what the wellness payload actually contains for a recent day before assuming it covers everything. If a metric the coach relies on is missing, that is the trigger for adding the direct Whoop integration; if not, it is dropped from scope entirely.
+* Check what the wellness payload actually contains for a recent day before assuming it covers everything, and record the answer against open item 3 in the PRD. If a metric is missing, it is dropped from the recovery deviation calculation per RECOV-02. Adding a direct Whoop integration is not an option: RECOV-03 forbids a Whoop client and SEC-04 forbids OAuth anywhere in the system.
 * Confirm the Zwift connection in intervals.icu settings is the two way integration, not just activity import. With it connected, planned workouts push to Zwift directly and no workout files ever need moving. Test it with one workout before the coach depends on it.
 
 ### Step 7: Calendar read access
@@ -95,7 +97,7 @@ Roughly 10 minutes
 * No Google Cloud project, no consent screen, no OAuth. In Google Calendar settings, open each calendar you want the coach to see and copy the secret address in iCal format.
 * Include anything that shapes your week: work, personal, golf, travel.
 * Paste the URLs into .env as a comma separated list. Treat them as passwords, because anyone holding one can read that calendar.
-* Note the trade: Google publishes these feeds on a cache, so a commitment added an hour ago may not appear immediately. Acceptable here because the coach only reads them and the weekly review confirms the week ahead. If the lag ever bites, this swaps to OAuth without changing anything else in the design.
+* Note the trade: Google publishes these feeds on a cache, so a commitment added an hour ago may not appear immediately. Acceptable here because the coach only reads them and the weekly review confirms the week ahead, which is what CALR-05 encodes. Swapping to OAuth is not the escape hatch if the lag bites — SEC-04 forbids OAuth anywhere in the system, and PLAN-04 is scoped to what the feed showed at scheduling time precisely so the lag is survivable.
 
 ### Step 8: MacroLog wiring
 
@@ -104,7 +106,8 @@ Roughly 10 minutes
 * No third party export app and no subscription. Apple Health data reaches the system through the HealthBridge module inside MacroLog.
 * Put the intervals.icu API key into MacroLog's gitignored config file alongside the Anthropic key. The same key goes in the coach environment, so it lives in two places.
 * Point MacroLog's macro writes at the coach ingest endpoint on your tunnel hostname, with the shared secret as a header.
-* Before building HealthBridge, read wellness for the last fortnight and check whether weight already varies day to day. If it does, something is already feeding it and the module is unnecessary.
+* Before building HealthBridge, read wellness for the last fortnight and check whether weight already varies day to day. If it does, something is already feeding it and the module is unnecessary. This is open item 1 in the PRD and it blocks P04.
+* HealthBridge is yours, not Claude Code's. It is a module inside MacroLog rather than this repository, so no requirement covers it and nothing in the phase plan builds it. If item 1 resolves toward building it, treat it as a prerequisite of P04.
 
 ### Step 9: Backfill
 
@@ -118,7 +121,8 @@ Roughly 10 minutes
 
 Roughly 30 minutes
 
-* Review the persona system prompt extracted from the coaching conversation before it is loaded. It sets the tone for years.
+* Commit the source coaching conversation to `docs/seed/coaching-conversation.md` first. CHAT-02 requires it in the repository, and P01 cannot start without it (open item 9).
+* Review the persona system prompt extracted from it, at `prompts/persona.md`, before it is loaded. It sets the tone for years.
 * Review the seeded facts, especially constraints. Anything wrong here propagates everywhere and constraints cannot be corrected automatically by design.
 * Confirm the starting block and let it publish to the calendar.
 
@@ -187,6 +191,8 @@ Symptoms and first checks
 
 Around three and a half hours across all eleven steps, most of it in steps 10 and 11 where you are reading output rather than configuring anything. With intervals.icu replacing the Whoop app and the file sync, and iCal feeds replacing Google OAuth, there is no OAuth anywhere in the system. The tunnel in step 2 is now the longest single task.
 
-Sequence them just ahead of the phase that needs them: steps 1 to 5 before phase 00, step 6 before phase 03, step 8 before phase 04, step 9 alongside phase 03, step 7 before phase 06, step 10 before phase 07.
+Sequence them just ahead of the phase that needs them: steps 1 to 5 before phase 00, step 6 before phase 03, step 8 before phase 04, step 9 alongside phase 03, step 7 before phase 06.
+
+Step 10 splits across two phases. The coaching conversation, the persona and the seeded constraint facts are needed before phase 01, because CHAT-02 loads the persona and SAFE-01 loads the constraints into every prompt. The starting block is a phase 07 concern and waits.
 
 Setup guide, July 2026. Companion to the PRD and the memory subsystem design.

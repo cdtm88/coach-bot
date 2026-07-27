@@ -2,7 +2,13 @@
 
 Review of `docs/prd.md` (PRD v2) read against `docs/memory-design.md` and `docs/setup.md`.
 
-Scope of this review: internal consistency, cross-document conflicts, phase coverage, testability of acceptance criteria, and gaps that would block implementation. No changes have been made to the PRD, design or setup guide — every finding below is a proposed change for a decision.
+Scope of this review: internal consistency, cross-document conflicts, phase coverage, testability of acceptance criteria, and gaps that would block implementation.
+
+> **Status: resolved in PRD v2.1.** Every blocking, significant, minor and editorial finding below has been applied across `docs/prd.md`, `docs/memory-design.md` and `docs/setup.md`. Four findings resolved into the open items register rather than into requirements, because they need information the documents do not yet hold: S8 (spend cap figures, open item 7), S9 (wellness payload completeness, open item 3), S12 (persona seed artefact, open item 9) and S15 (HealthBridge ownership, open item 2). This document stays as the record of what was wrong and why it was changed; the requirements themselves live in the PRD.
+>
+> Decisions taken where the review offered options: gym load converts onto the cycling scale via RPE × duration × a configured coefficient (GYM-08); `decay_days` is a half life with a 0.20 confidence floor; design section 4 is scoped to the memory subsystem rather than extended to the ingest tables.
+
+Every finding below is stated as it was found, in the present tense of the pre-v2.1 documents.
 
 **Headline.** The PRD is unusually strong on the things that normally go wrong: the governing asymmetry is stated once and inherited everywhere, acceptance criteria are attached to every requirement, and the absence-trap reasoning (FIT-12, RECOV-06, ADJ-08, CHAT-09) is consistent across four domains. The problems are concentrated in three places: the design document is stale relative to PRD v2 in ways that break P00, a small number of requirements contradict each other outright, and several load-bearing numbers are never defined.
 
@@ -232,6 +238,7 @@ Proposed: either state explicitly that HealthBridge is out of scope for this rep
 - BREAK-01 requires a start and end date; BREAK-04 makes the end date inert for illness breaks. Allow open-ended breaks.
 - 23 domains are claimed; there are 23 section headings but 24 ID prefixes (PERF and SEC share the "Non functional" section).
 - No requirement covers athlete-initiated deletion — "forget that". `facts.status` has a `rejected` value that nothing in the PRD ever uses. CONS-07's "facts never silently vanish" is about decay, not erasure.
+- **Found while applying the fixes, not in the original pass.** Two more instances of the B5 pattern — a companion document offering a remedy the PRD forbids. Setup step 7 says the calendar feed lag "swaps to OAuth without changing anything else in the design", which SEC-04 bans outright; CALR-05 and PLAN-04 are what make the lag survivable instead. And setup §7 sequences step 10 (persona, seeded constraints, starting block) before phase 07, but CHAT-02 and SAFE-01 need the persona and constraints at phase 01 — the step has to split.
 - MEM-03 does not require the close-old/insert-new pair to be atomic, which the partial unique index in MEM-02 makes mandatory. Worth stating, since a non-transactional implementation fails intermittently rather than immediately.
 - `fact_keys.value_type` exists in the design and design §6 step 3 rejects wrong value types, but no requirement or acceptance covers value-type validation — MEM-01 tests only the foreign key.
 
