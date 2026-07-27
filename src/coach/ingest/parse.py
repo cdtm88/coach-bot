@@ -206,6 +206,13 @@ def from_streams(streams: list[dict], started_at: datetime | None = None) -> Par
         if a is not None and b is not None
     )
 
+    # Duration is the sample count because the streams endpoint serves one sample
+    # per second. That is an assumption about the feed rather than arithmetic, so
+    # it is worth naming: if the endpoint ever served a different rate, this would
+    # be wrong in a way no test here would notice. The FIT path does not share the
+    # assumption — it subtracts timestamps.
+    duration_s = max(len(power), len(hr), len(cadence)) or None
+
     return _summarise(
         power,
         hr,
@@ -213,7 +220,7 @@ def from_streams(streams: list[dict], started_at: datetime | None = None) -> Par
         float(distance[-1]) if distance else None,
         round(gain, 1) if gain else None,
         started_at,
-        max(len(power), len(hr), len(cadence)) or None,
+        duration_s,
         "streams",
     )
 
