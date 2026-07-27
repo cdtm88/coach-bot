@@ -68,21 +68,109 @@ Of the 174 `Activity` fields, the values intervals.icu computes are almost all
 these are stored alongside parsed values and never substituted for them, and the
 prefix makes that mechanically checkable rather than a matter of care.
 
-## The gap: no webhook in the spec
+## Rate limits
 
-**FIT-01 assumes a webhook and the API spec contains none.** Searching the whole
-document finds zero occurrences of `webhook`, `callback` or `web_hook`.
+Two windows, both reported on every response, per the developer's own post:
 
-That does not prove webhooks do not exist. Registration may live in the account
-settings UI rather than the API, which is common. But it is not verifiable from
-the spec, and FIT-01's acceptance depends on it: "a new Zwift ride appears as a
-session row within 2 minutes without polling".
+```
+X-RateLimit-Limit:     <15m limit>,<daily limit>
+X-RateLimit-Remaining: <15m remaining>,<daily remaining>
+```
 
-If there is no webhook, the consequences are concrete. The 6 hour reconcile
-becomes the only ingest path rather than a backstop, a ride waits up to 6 hours
-for its review, and PERF-03's 5 minute end to end budget cannot be met. The
-options at that point are a shorter poll interval, which contradicts FIT-01's
-own wording, or relaxing the budget. Both are decisions rather than fixes.
+Daily limits reset at midnight UTC. Read these headers rather than guessing; the
+6 hour reconcile and any backfill should back off on them.
 
-Tracked as open item 10, and it needs a look at the intervals.icu settings page
-by someone logged in.
+`0` works in place of the athlete id on any path that takes one, resolving to the
+athlete owning the key. Worth using: it removes a configuration value that can
+drift out of step with the key.
+
+## Webhooks: they exist, outside the OpenAPI spec
+
+The spec contains no webhook path, which is why this was open item 10. They are
+real; they are configured in the app management UI rather than through the API,
+which is why the spec never mentions them. From the official integration
+cookbook:
+
+> Configure webhooks using the management page for your app. Look for your app in
+> /settings and click "Manage App".
+
+The payload carries the event and a shared secret:
+
+```json
+{
+  "secret": "ooKeodacie8I",
+  "events": [
+    { "athlete_id": "...", "type": "ACTIVITY_UPLOADED",
+      "timestamp": "2024-12-06T06:40:47.011+00:00", "activity": {} }
+  ]
+}
+```
+
+Event types that matter to us:
+
+| Type | Use |
+| --- | --- |
+| `ACTIVITY_UPLOADED` | FIT-01's trigger. Fires on upload. |
+| `ACTIVITY_ANALYZED` | Sent after a 60 second delay so multiple events for one activity consolidate into a single webhook. |
+| `CALENDAR_UPDATED` | PLAN-11's athlete edit detection. Carries `oauth_client_id` and `external_id`, so we can filter to events our own app created. |
+| `SPORT_SETTINGS_UPDATED` | Fires when FTP or zones change upstream. A physiology fact changing under us. |
+
+`CALENDAR_EVENT_UPDATED` and `CALENDAR_EVENT_DELETED` are legacy; use
+`CALENDAR_UPDATED`.
+
+**Three things this changes.**
+
+*FIT-02 says "signature verified".* There is no HMAC signature. Verification is a
+shared secret carried in the body, so the check is a constant time comparison
+against a configured value, and replay safety has to come from the timestamp plus
+FIT-04's deduplication rather than from the transport.
+
+*The 60 second delay on `ACTIVITY_ANALYZED` sits inside PERF-03's 5 minute
+budget.* If we wait for the analysed event rather than the upload event, a third
+of the budget is gone before we start. FIT-01 should trigger on
+`ACTIVITY_UPLOADED`.
+
+*Activity webhooks are not delivered for Strava activities.* Quoted directly from
+the webhook documentation. This is only survivable because the Strava connection
+was already dropped, so activities reach intervals.icu from Zwift and Wahoo
+directly. It is worth confirming that no path still routes through Strava, since
+reconnecting it later would silently disable the webhook for everything that
+arrives that way. Related to open item 4.
+
+## Planned workouts: upsert on our own key
+
+From the official guide for uploading planned workouts.
+
+```
+POST /api/v1/athlete/0/events/bulk?upsert=true
+PUT  /api/v1/athlete/0/events/bulk-delete
+```
+
+`external_id` is our primary key, and **"the external_id is only matched against
+events created by your application"**. Events that do not exist are created,
+those that do are updated. That is PLAN-11's stable coach id and "no duplicates
+after ten changes" delivered by the API rather than by us, and it means we never
+have to store an intervals.icu event id.
+
+**PLAN-09 and PLAN-10 get easier than written.** A workout can be supplied three
+ways: `file_contents_base64` (zwo, fit, mrc, erg), `file_contents` for raw ZWO, or
+**`description` carrying native Intervals.icu workout text**. The third needs no
+file generation at all, which is exactly what PLAN-10 wants when it says the
+coach produces the step list and never the file.
+
+Listing events returns everything on the calendar, not just ours; filter on
+`oauth_client_id` to see only what we created.
+
+## Where OAuth appears, and why SEC-04 still holds
+
+Two places mention it. Webhook registration is done against an "app", and the
+planned workout guide says to "request CALENDAR:WRITE scope". Both are the
+multi-user path; the developer is explicit that a personal key uses basic auth and
+that OAuth is for "apps intended to be used by more than one person".
+
+The reading this project takes: registering an app in a web UI to obtain a webhook
+endpoint is configuration, not an OAuth flow. No authorisation redirect, no token
+exchange, no refresh, and nothing in the codebase implements one. SEC-04 says "no
+OAuth flow exists anywhere in the system", and that stays true. If app
+registration turns out to force a token exchange at runtime, that is a genuine
+conflict with SEC-04 and needs deciding rather than working around.
