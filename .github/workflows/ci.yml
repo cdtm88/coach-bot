@@ -21,7 +21,7 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U coach"
+          --health-cmd "pg_isready -U coach -d postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -32,9 +32,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The runner's system Python is externally managed, so `uv pip install
+      # --system` refuses to touch it. setup-python provides an interpreter that
+      # is ours to install into.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+          cache-dependency-glob: pyproject.toml
 
       - name: Install
         run: uv pip install --system -e ".[dev]"
