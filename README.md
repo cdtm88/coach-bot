@@ -26,10 +26,14 @@ Later phases are in `docs/prd.md` section 4.
 
 ```
 migrations/        numbered SQL, applied on boot
+prompts/persona.md the coach's voice, written from docs/seed/
+seeds/athlete.json the initial facts, each traced to the source transcript
 src/coach/
   config.py        environment only; no credential defaults (SEC-01)
+  clock.py         local day and week boundaries (TZ-01/02/03)
   db.py            connections
   migrate.py       the boot-time runner
+  seed.py          one-time memory seed from seeds/athlete.json
   memory/
     keys.py        controlled vocabulary and value typing (MEM-01, MEM-14)
     facts.py       supersession, provenance, audit, decay

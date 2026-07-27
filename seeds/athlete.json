@@ -1,0 +1,145 @@
+{
+  "_source": "docs/seed/coaching-conversation.md, 26 to 27 July 2026",
+  "_note": [
+    "Every value here is traceable to that document. Where the transcript gives a",
+    "range, the seed records the midpoint and the reason names the range. Where the",
+    "transcript does not state something, it is absent rather than inferred: there is",
+    "no birth_year, because 'age 37 in July 2026' does not determine one, and no",
+    "availability.weekday_minutes, because he said all seven days but never a duration."
+  ],
+
+  "constraints": [
+    {
+      "key": "constraint.injury_history",
+      "value": ["L5-S1 herniated disc repair, November 2025. Recovery complete, occasional stiffness. Discharged by physio, cleared for golf and other activity."],
+      "reason": "stated at intake"
+    },
+    {
+      "key": "constraint.movement_restrictions",
+      "value": [
+        "no barbell deadlifts",
+        "no heavy barbell back squats",
+        "no loaded twists",
+        "no sit-ups or crunches",
+        "loaded hip hinge (RDL, single leg RDL, conventional deadlift) withheld pending review around week 8, because the hinge produces the highest lumbar shear of any common gym pattern and technique errors are expensive"
+      ],
+      "reason": "set at intake against the L5-S1 repair"
+    }
+  ],
+
+  "facts": [
+    {
+      "key": "profile.height_cm",
+      "value": 179,
+      "provenance": "stated",
+      "reason": "stated at intake"
+    },
+    {
+      "key": "profile.primary_sport",
+      "value": "cycling, with strength work supporting it",
+      "provenance": "stated",
+      "reason": "stated at intake"
+    },
+    {
+      "key": "profile.training_age_years",
+      "value": 0,
+      "provenance": "stated",
+      "reason": "structured training began 8 July 2026"
+    },
+
+    {
+      "key": "goal.target_weight_kg",
+      "value": 100.0,
+      "provenance": "stated",
+      "reason": "get back under 100 kg from 129 kg, at 0.6 to 0.8 kg per week, 10 to 14 months"
+    },
+    {
+      "key": "goal.event_target",
+      "value": "Alpe du Zwift in under 1 hour",
+      "provenance": "stated",
+      "reason": "stated at intake. Assessed as a four to six year project that may never happen; the milestones below are the real ladder."
+    },
+    {
+      "key": "goal.milestone_dates",
+      "value": [
+        "complete the Alpe within 12 weeks",
+        "sub 2 hours at around 12 months",
+        "sub 90 minutes at around 24 to 30 months",
+        "revisit sub 60 only after sub 90"
+      ],
+      "provenance": "computed",
+      "reason": "modelled from the standard cycling power equation against projected weight and power"
+    },
+    {
+      "key": "goal.protein_target_g",
+      "value": 160,
+      "provenance": "computed",
+      "reason": "150 to 170 g for satiety, lean mass retention in a deficit and post surgical tissue support. Estimated intake at intake was 95 to 100 g."
+    },
+    {
+      "key": "goal.fitness_preservation",
+      "value": "weight that stays off. Lean mass retention is the mechanism: it keeps maintenance high enough that the loss holds.",
+      "provenance": "stated",
+      "reason": "stated at intake as the point of the whole thing"
+    },
+
+    {
+      "key": "availability.days",
+      "value": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+      "provenance": "stated",
+      "reason": "available every day after work. Six are programmed, one is a genuine rest day."
+    },
+
+    {
+      "key": "equipment.trainer",
+      "value": "Wahoo Kickr Core 2 on a Zwift Ride frame, indoors in Dubai, cooling being built up from one fan",
+      "provenance": "stated",
+      "reason": "stated at intake"
+    },
+    {
+      "key": "equipment.gym_access",
+      "value": "small apartment building gym, limited equipment. Owns resistance bands and glute bands. A full gym adds a friction step that defeats adherence, so the apartment gym is the deliberate choice until roughly 105 kg.",
+      "provenance": "stated",
+      "reason": "stated at intake and endorsed: the programme actually done beats the better programme skipped"
+    },
+
+    {
+      "key": "physiology.ftp_watts",
+      "value": 115,
+      "provenance": "computed",
+      "reason": "ramp test 27 July 2026, 75 percent of MAP 153 W, no discount applied. Supersedes the zFTP of 101 W, which was never a measurement."
+    },
+    {
+      "key": "physiology.threshold_hr",
+      "value": 152,
+      "provenance": "computed",
+      "reason": "heart rate at 115 W during the ramp test was 149 to 152. Anchored to threshold rather than a guessed maximum."
+    },
+    {
+      "key": "physiology.max_hr",
+      "value": 169,
+      "provenance": "observed",
+      "reason": "highest observed, 10 July 2026. The ramp test reached 166, so 169 stands. Age predicted 183 was never approached."
+    },
+
+    {
+      "key": "prefs.coach_tone",
+      "value": "direct. Challenge rather than validate, evidence only, verdict before reasoning, no em dashes.",
+      "provenance": "stated",
+      "reason": "from the coaching brief given at intake"
+    }
+  ],
+
+  "notes": [
+    {
+      "kind": "block_archive",
+      "occurred_on": "2026-07-27",
+      "body": "Baseline block, 8 to 27 July 2026. Thirteen rides, 7.9 hours actual riding, about 3 hours a week. Eighty one percent of that time was tempo or harder, which held under every plausible HRmax assumption from 172 to 190. The cause was a broken anchor rather than poor discipline: Zwift's FTP field read 146 W, which is above his best 5 minute power and physiologically impossible, so Zwift's Zone 2 displayed as 82 to 110 W and he rode it faithfully. Against a real threshold near 115 W that band is tempo. Two independent methods agreed once the FTP was corrected. Ramp test on 27 July set FTP at 115 W, threshold heart rate 152, observed max 169. Heart rate has a very high floor: going from 40 W to 100 W moved it about 12 beats, which is the fastest adapting thing in his physiology and the reason the benchmark ride exists. Cardiac drift of about 8 bpm at matched power is unresolved between aerobic base and Dubai heat, and a second fan plus electrolytes is the experiment that separates them."
+    },
+    {
+      "kind": "observation",
+      "occurred_on": "2026-07-27",
+      "body": "Cycling contributes roughly 5 percent of the deficit, about 984 kcal a week or 140 kcal a day of mechanical work. Diet does the rest. Intake target 2,400 to 2,500 kcal against an estimated maintenance of 3,000, which is an estimate and the scale trend is the measurement. Breakfast is the weakest meal. The weekly takeaway stays, because eliminating enjoyed food predicts relapse."
+    }
+  ]
+}

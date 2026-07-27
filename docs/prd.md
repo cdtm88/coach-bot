@@ -404,7 +404,7 @@ This is the only open items register. `docs/memory-design.md` section 14 points 
 | 6 | **Transcription:** hosted API or local model on the homelab. Latency against privacy and running cost. | P11 | |
 | 7 | **Resolved. Spend caps:** USD 3.00 daily hard stop in the coach, USD 60 monthly alert at the provider. Written into OBS-07 and setup step 5. | — | Revisit after the first month of OBS-01 data. The daily figure is a runaway backstop, not a thirtieth of the monthly, so the two are deliberately not proportional. |
 | 8 | **Raw message retention period,** and whether consolidated days can be pruned. Nothing currently states how long messages are kept. | P12 | Interacts with OBS-06 backup size. |
-| 9 | **Commit the persona seed.** CHAT-02 requires the source coaching conversation in the repository at `docs/seed/coaching-conversation.md`. | P01 | |
+| 9 | **Resolved. Persona seed.** The source coaching conversation is committed at `docs/seed/coaching-conversation.md`; `prompts/persona.md` is written from it and `seeds/athlete.json` carries the facts it establishes. | — | The transcript is the audit trail for every seeded value. Re-read it before changing the persona's voice. |
 
 
 181 requirements across 24 domains in 23 sections.

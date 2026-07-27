@@ -271,15 +271,6 @@ def test_persona_loads_from_the_versioned_file() -> None:
     assert "never increase it on your own" in body
 
 
-def test_persona_is_still_flagged_as_unseeded() -> None:
-    """Open item 9: the scaffold is not the athlete's coach.
-
-    This test fails once the real conversation is seeded and the marker removed,
-    which is the point — it is a reminder, not a permanent assertion.
-    """
-    assert not persona.is_seeded(), "persona seeded: drop this test and close open item 9"
-
-
 def test_editing_the_persona_changes_behaviour_without_a_deploy(tmp_path) -> None:
     """CHAT-02: the file is read per call, not imported once."""
     path = tmp_path / "persona.md"

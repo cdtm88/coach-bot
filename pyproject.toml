@@ -17,6 +17,7 @@ dev = [
 
 [project.scripts]
 coach-migrate = "coach.migrate:main"
+coach-seed = "coach.seed:main"
 
 [build-system]
 requires = ["hatchling"]
