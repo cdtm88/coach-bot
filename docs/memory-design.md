@@ -23,7 +23,9 @@ Design document. Precedes all ingest phases in the existing PRD. Written for Cla
 
 ### Tier 1: working memory (volatile)
 
-The live conversation plus a single row of session state maintained by the fast model on every turn: rolling summary, open threads, what was said today that has not been consolidated, current topic. Wiped by the nightly job. Nothing here is treated as true.
+The live conversation plus a single row of session state maintained by the fast model on every turn: rolling summary, open threads, what was said today that has not been consolidated, current topic. Nothing here is treated as true.
+
+The nightly job clears `today_uncommitted` and regenerates `rolling_summary`, `open_threads` and `last_topic` from the day it has just consolidated. It does not empty the row: the continuity note is assembled from those fields, and CHAT-05 requires the coach to open from the last open thread rather than cold.
 
 ### Tier 2: consolidation (nightly, heavier model)
 
@@ -60,6 +62,10 @@ What is in the prompt on an ordinary message
 Steady state is roughly 2.3k to 3.8k tokens of context before conversation history. Comfortably affordable at daily use.
 
 ## 4. Data model
+
+This section is authoritative for the memory subsystem: facts, audit, episodic notes, prescriptions, adjustments, working memory, feeds and verification. It is not the schema for the whole system. The ingest tables — sessions, blocks and their versions, derived rollups, messages, macros, wellness and calendar events — are defined at the phase that introduces them, and the PRD's governance table says so.
+
+One consequence: `prescriptions.session_id` below references `sessions`, which P00 does not create. The column and its foreign key are added in P03 alongside the sessions table, so the P00 migration stands alone.
 
 ### Facts
 
@@ -139,7 +145,8 @@ create table prescriptions (
   status        text not null default 'planned'
                 check (status in ('planned','adjusted','completed','missed','cancelled')),
   calendar_event_id text,
-  session_id    bigint references sessions(id),
+  -- session_id added in P03 with the sessions table:
+  --   alter table prescriptions add column session_id bigint references sessions(id);
   created_at    timestamptz not null default now()
 );
 
@@ -200,9 +207,11 @@ create table recall_tests (
 
 Controlled vocabulary. Anything outside it is rejected at write time.
 
-| Namespace | Examples | Typical provenance | Decay |
+The decay column is `decay_days` in the DDL and it is a **half life**, not a lifetime. Confidence follows `floor + (1 - floor) * 0.5 ^ (days_since_confirmation / decay_days)` with the floor at **0.20**, so it halves toward the floor and never reaches zero. An availability fact unconfirmed for 90 days sits at 0.30; at a year it is approaching 0.20 and is still active. Facts do not expire. PRD CONS-07 states the same curve.
+
+| Namespace | Examples | Typical provenance | Half life |
 | --- | --- | --- | --- |
-| constraint.\* | injury limits, movement restrictions, medical flags | stated only | Never |
+| constraint.\* | injury limits, movement restrictions, medical flags | stated only | Never decays |
 | profile.\* | height, sport, training age | stated | 365 days |
 | goal.\* | target weight, Alpe target, milestone dates | stated | 90 days |
 | availability.\* | weekday minutes, training days, blackouts | stated then observed | 30 days |
@@ -216,17 +225,23 @@ Controlled vocabulary. Anything outside it is rejected at write time.
 
 Only fires on an explicit instruction or a direct correction. Writes to `pending_writes`, never to `facts`. Not narrated to the athlete. A same day correction supersedes an earlier pending row rather than queuing twice.
 
+### The athlete safety path (the one exception)
+
+An explicit athlete statement of a constraint writes the safety fact **directly**, bypassing `pending_writes` and consolidation, with provenance `stated` and actor `athlete`. The coach restates the constraint and the athlete confirms before it lands.
+
+This exists because the rest of the design would otherwise make safety facts write-once: consolidation is the only ratifier and consolidation is forbidden from touching safety keys, so an injury reported after the initial seed could never be recorded. It is the only direct writer outside consolidation, it can write nothing but safety keys, and it is the only place the system asks for confirmation. PRD SAFE-06 governs.
+
 ### Nightly consolidation (authoritative)
 
 1. Gather the day's messages, telemetry deltas, pending writes, active facts.
 2. Heavier model emits candidate diffs as strict JSON: key, new value, provenance, reason, evidence refs.
-3. Validate against `fact_keys`. Unknown keys, wrong value types and any write to a `safety` key are rejected and logged.
+3. Validate against `fact_keys`. Unknown keys, wrong value types and any write to a `safety` key are rejected and logged. Safety keys change only through the athlete path above.
 4. Apply the conflict matrix in code. The model's opinion on precedence is discarded.
 5. Write supersessions and `fact_events` rows.
 6. Recompute derived rollups.
 7. Write the day summary note; embed nothing, index for FTS.
 8. Set `mention_pending` on any fact where observed data contradicted a stated one.
-9. Decay confidence on unconfirmed facts by category half life.
+9. Decay confidence on unconfirmed facts by the category half life of section 5, asymptotic to the 0.20 floor.
 10. Run the recall regression suite and the contradiction linter. Alert only on failure.
 
 ## 7. Conflict resolution matrix
@@ -239,7 +254,7 @@ Deterministic. Implemented in code, not prompted.
 | Stated vs observed, behavioural key | Observed wins | Mentioned once in passing |
 | Stated vs observed, intent key (goals) | Stated wins | None |
 | Inferred vs measured | Measured wins, silently | None |
-| Any change to a safety key | Rejected unless explicitly stated by the athlete | Explicit statement required |
+| Any change to a safety key | Rejected. Only the athlete safety path of section 6 can write one | Explicit statement, then confirmation |
 | Ambiguous or low evidence | Held in pending, resolved conversationally or aged out at 14 days | Possible aside |
 
 ## 8. Self correction behaviours
@@ -263,7 +278,11 @@ Consolidation looks for negation of a coach assertion, statements inconsistent w
 
 ### Decay with contextual reconfirmation
 
-Past its half life a fact loses confidence rather than expiring. Low confidence facts enter the prompt flagged as worth verifying naturally, and the coach folds one into a relevant exchange. There is never an audit list.
+Past its half life a fact loses confidence rather than expiring, on the curve in section 5. Facts below 0.50 enter the prompt flagged as worth verifying naturally, and the coach folds one into a relevant exchange. There is never an audit list.
+
+### One interruption per conversation
+
+The mention once rule, the verification candidate, the outlier confirmation and the body mass gap mention are four separate one-per-conversation allowances, and left alone they compose into four interruptions in a single conversation while each reports compliance. They share a single budget instead, with a priority order set by PRD CHAT-11. Feed staleness shapes what the coach reasons from and is never itself an interruption.
 
 ## 9. Naturalness rules for the agent
 
@@ -275,6 +294,8 @@ Past its half life a fact loses confidence rather than expiring. Low confidence 
 * Persona lives in a versioned system prompt file, seeded from the July 2026 coaching conversation.
 
 ## 10. Feeds
+
+> Rationale, not specification. This section explains why the feed, planning and adjustment rules are shaped as they are. The rules themselves are the FIT, HLTH, RECOV, CALR, PLAN, ADJ and LOG requirements in the PRD, which governs on scope. Where this section and the PRD diverge, the PRD wins and this section gets fixed.
 
 All authentication is by API key or secret URL. No OAuth anywhere, and no third party health export app.
 
@@ -371,30 +392,21 @@ Viable and would give managed backups plus SQL access from anywhere. The trade i
 ## 12. Verification
 
 * **Recall regression suite.** Thirty fixed questions with expected answers, run after every consolidation. Covers current state, historical state and change reasons. Alerts to an admin chat on failure only.
-* **Contradiction linter.** SQL assertions: one active row per key, valid ranges coherent, supersession pointers resolve, no safety key with non stated provenance, no active fact below the confidence floor being presented as certain.
+* **Contradiction linter.** SQL assertions: one active row per key, valid ranges coherent, supersession pointers resolve, every fact carries a created event and every superseded fact a superseded event, no safety key with non stated provenance or an actor other than `athlete`, no active fact below the 0.20 confidence floor, nothing under 0.50 presented as certain.
 * **Audit on demand.** Asking the coach what it thinks it knows about a topic returns active facts, provenance, when each last changed and what it replaced.
 * **Nightly dump.** Postgres backup plus a human readable markdown export of the full active fact set.
 
-## 13. Phase 00 acceptance criteria
+## 13. Phase membership and acceptance
 
-1. Bot converses over long polling and persists all messages.
-2. Facts, fact\_keys, fact\_events, notes, conversation\_state and pending\_writes exist; the partial unique index is enforced.
-3. Consolidation runs nightly and emits diffs with reasons and evidence refs.
-4. A measured value supersedes an inferred one with no human input, and the change is visible in fact\_events.
-5. An attempted write to a safety key by consolidation is rejected and logged.
-6. The mention once rule delivers at most one aside per conversation and expires at 72 hours.
-7. The recall suite passes at 100 percent against seeded data.
-8. No memory operation is narrated during ordinary conversation.
-9. A FIT file breaching a trigger rule downgrades the next session, updates the calendar event in place and logs an adjustment\_events row; an attempted automatic upgrade is rejected.
+Set by `docs/prd.md` section 4, which governs on scope and acceptance. This document does not define phases.
 
-Ingest phases from the existing PRD follow only once these pass.
+The memory subsystem described here is built in P00 (the store and its invariants), P01 (context assembly and the naturalness rules) and P02 (consolidation, the conflict matrix and decay). The mid week adjustment authority in section 10 is P09, not P00. An earlier revision of this section listed all of that as phase 00 acceptance; it was a pre-v2 plan and has been removed rather than left to mislead.
 
 ## 14. Open items
 
-* Resolved: Whoop developer platform access is free, requires an active membership. v2 API, OAuth 2.0, webhooks available. App approval is only needed for public launch, not for single user personal use.
-* Transcription: hosted API versus local whisper on the homelab. Latency against privacy and running cost.
-* Resolved: mid week rewriting is permitted, driven by FIT data, bounded by the downgrade only asymmetry in section 10.
-* Raw message retention period, and whether consolidated days can be pruned.
-* Model split: fast model per turn, heavier model for consolidation. Cost logging per PRD phase applies to both.
+Held in `docs/prd.md` section 5, which is the single register. Two former entries here are settled and worth recording:
 
-Design document, July 2026. Supersedes the daily memory confirmation approach previously proposed. Implement before any ingest phase.
+* **Superseded: direct Whoop integration.** An earlier revision noted that Whoop developer access is free and its v2 API available under OAuth 2.0. PRD v2 closed this off: RECOV-03 forbids any Whoop client and SEC-04 forbids OAuth anywhere in the system. Whoop reaches the coach only through intervals.icu wellness. If a metric turns out to be missing from that feed, RECOV-02 drops it from the deviation calculation — adding a direct integration is not an available remedy.
+* **Resolved: mid week rewriting** is permitted, driven by FIT data, bounded by the downgrade only asymmetry in section 10.
+
+Design document. Revised alongside PRD v2; supersedes the daily memory confirmation approach previously proposed. Implement before any ingest phase.
