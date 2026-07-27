@@ -161,16 +161,64 @@ coach produces the step list and never the file.
 Listing events returns everything on the calendar, not just ours; filter on
 `oauth_client_id` to see only what we created.
 
-## Where OAuth appears, and why SEC-04 still holds
+## Webhooks require an OAuth application, and that collides with SEC-04
 
-Two places mention it. Webhook registration is done against an "app", and the
-planned workout guide says to "request CALENDAR:WRITE scope". Both are the
-multi-user path; the developer is explicit that a personal key uses basic auth and
-that OAuth is for "apps intended to be used by more than one person".
+This is the significant unresolved thing, and the earlier optimistic reading of
+it was wrong. Corrected here rather than quietly amended, because the earlier
+version of this file argued SEC-04 was safe.
 
-The reading this project takes: registering an app in a web UI to obtain a webhook
-endpoint is configuration, not an OAuth flow. No authorisation redirect, no token
-exchange, no refresh, and nothing in the codebase implements one. SEC-04 says "no
-OAuth flow exists anywhere in the system", and that stays true. If app
-registration turns out to force a token exchange at runtime, that is a genuine
-conflict with SEC-04 and needs deciding rather than working around.
+Webhooks are configured on an app's management page. Apps are OAuth
+applications, and creating one is a manual process, from the OAuth post:
+
+> Please mail the following info to david@intervals.icu: App name, Description,
+> Website URL, Logo image URL (square, at least 128x128), Privacy policy URL,
+> Redirect URI's, Your Intervals.icu ID
+>
+> Once your application has been created your app will show up on the /settings
+> page (only for you as the owner) and you can click "Manage App" to retrieve
+> your client_id and secret, change redirect URL's, **configure webhooks** and so
+> on.
+
+And the personal path is explicitly the one without any of that:
+
+> Note that you don't need to do all this if you just want access to your own
+> data. Use your API key to do that.
+
+So the API key gets every endpoint we need and no webhook. The webhook is
+attached to an application.
+
+**What is known**
+
+* App creation is required for webhooks, and requires a human at intervals.icu to
+  approve it. There is a website URL and a privacy policy URL to supply for what
+  is a single user personal tool.
+* API calls can still use the API key. Registering an app does not force bearer
+  tokens on the calls themselves.
+
+**What is not known, and decides this**
+
+Whether a webhook fires for the app owner's own activities without that athlete
+having granted the app authorisation through the OAuth consent flow. The cookbook
+leans the other way:
+
+> You need to store the Intervals.icu athlete_id obtained via OAuth flow so you
+> can map the webhook back to the athlete in your system.
+
+If authorisation is required, then FIT-01 depends on running an OAuth flow at
+least once and holding a bearer token, which is exactly what SEC-04 forbids:
+"no OAuth flow exists anywhere in the system". A one time consent is still a
+consent redirect and a token exchange.
+
+**The three ways out, none free**
+
+1. Register the app, authorise it against the athlete's own account once, store
+   the bearer token. Keeps FIT-01 and PERF-03 intact. Requires amending SEC-04,
+   which was written to keep exactly this out of the system.
+2. No webhooks. Ingest becomes the reconcile loop only. FIT-01's "within 2
+   minutes without polling" and PERF-03's 5 minute budget both have to change,
+   or the interval has to drop far enough to be polling in all but name.
+3. Register the app and test whether owner webhooks fire unauthorised. Costs an
+   email and a wait, and may simply confirm option 1.
+
+Tracked as open item 11. Nothing in P03 should be built until it is settled,
+because it decides whether ingest is push or pull.
