@@ -209,16 +209,50 @@ least once and holding a bearer token, which is exactly what SEC-04 forbids:
 "no OAuth flow exists anywhere in the system". A one time consent is still a
 consent redirect and a token exchange.
 
-**The three ways out, none free**
+**Resolved: the tokens are static, so there is nothing to implement**
 
-1. Register the app, authorise it against the athlete's own account once, store
-   the bearer token. Keeps FIT-01 and PERF-03 intact. Requires amending SEC-04,
-   which was written to keep exactly this out of the system.
-2. No webhooks. Ingest becomes the reconcile loop only. FIT-01's "within 2
-   minutes without polling" and PERF-03's 5 minute budget both have to change,
-   or the interval has to drop far enough to be polling in all but name.
-3. Register the app and test whether owner webhooks fire unauthorised. Costs an
-   email and a wait, and may simply confirm option 1.
+Two statements in the OAuth thread settle it. From the developer:
 
-Tracked as open item 11. Nothing in P03 should be built until it is settled,
-because it decides whether ingest is push or pull.
+> Intervals.icu is a bit easier because it doesn't use refresh tokens, only
+> access tokens. (#9)
+
+And on expiry, from a long standing integrator and confirmed by the developer in
+the following post:
+
+> AFAIK, the token is once-off (never had to re-login to get a new one). Whenever
+> a new login is detected, a new token gets generated and that would be the token
+> that has to be used across all your devices. The old one is discarded. (#20)
+>
+> It is as app4g says. (#22, david)
+
+So the shape is: authorise once in a browser, receive a bearer token that does
+not expire and cannot be refreshed because refresh does not exist, paste it into
+`.env` beside the API key. The consent is a one time human action, not a code
+path. The codebase gets no authorisation redirect, no token exchange, no refresh
+timer and no OAuth client, which is exactly what SEC-04's acceptance asks for.
+
+It is worth being precise about what did and did not change. SEC-04's prose said
+"no OAuth flow exists anywhere in the system". A one time browser consent is an
+OAuth flow, performed by a person, outside the system. The requirement has been
+amended to say that plainly rather than left to read as though nothing happened.
+The acceptance criterion is unchanged and still passes.
+
+**Two operational consequences.**
+
+Re-authorising issues a new token and discards the old one. Only one token exists
+per app per athlete, so redoing the consent silently breaks a running deployment
+until `.env` is updated. Worth a line in the setup guide rather than a surprise.
+
+The API key still does every API call. The bearer token may end up entirely
+unused at runtime: it is the consent that links the app to the athlete and makes
+webhooks fire, not the token in a header. Keep using the key for calls and treat
+the token as a registration artefact unless something proves otherwise.
+
+There is also a manual path if self service registration is awkward. In 2024 the
+developer offered to configure webhooks directly:
+
+> There is some undocumented support for webhooks. If you send me one or two web
+> hook URLs (e.g. one dev one prod). I will set that up for you. (#29)
+
+Superseded by the self service management page later that year, but it suggests
+a friendly response to a single user asking.
