@@ -1,0 +1,195 @@
+"""The reconcile backstop and the bulk backfill.
+
+FIT-09 (history loads silently), FIT-11 (upstream activities missing locally are
+backfilled), FIT-13 (rollups recompute after a bulk load rather than waiting for
+the night).
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+from typing import Any
+from zoneinfo import ZoneInfo
+
+import psycopg
+
+from coach.ingest import activities as actmod
+from coach.ingest import client as clientmod
+
+log = logging.getLogger(__name__)
+
+# FIT-01: the backstop interval. The webhook is the trigger; this catches what it
+# drops, which upstream says is rare but not impossible.
+INTERVAL_HOURS = 6
+
+
+@dataclass
+class Outcome:
+    examined: int = 0
+    created: int = 0
+    updated: int = 0
+    skipped: int = 0
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def changed(self) -> int:
+        return self.created + self.updated
+
+
+def local_refs(conn: psycopg.Connection, oldest: date, newest: date | None = None) -> set[str]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "select external_ref from sessions "
+            "where external_ref is not null and local_date >= %s "
+            "  and (%s::date is null or local_date <= %s)",
+            (oldest, newest, newest),
+        )
+        return {r["external_ref"] for r in cur.fetchall()}
+
+
+def fetch_parsed_inputs(
+    client: clientmod.Intervals, activity_id: str
+) -> tuple[bytes | None, list[dict[str, Any]] | None]:
+    """The original file if there is one, streams otherwise (FIT-03).
+
+    Never falls back to the platform's aggregates: if both are unavailable the
+    session simply has no parsed values, which is honest.
+    """
+    data = client.original_file(activity_id)
+    if data:
+        return data, None
+    try:
+        return None, client.streams(activity_id)
+    except clientmod.IntervalsError as exc:
+        log.info("no streams for %s either: %s", activity_id, exc)
+        return None, None
+
+
+def run(
+    conn: psycopg.Connection,
+    client: clientmod.Intervals,
+    tz: ZoneInfo,
+    oldest: date,
+    newest: date | None = None,
+    backfill: bool = False,
+    fetch_files: bool = True,
+) -> Outcome:
+    """Pull a date range and reconcile it against what is stored.
+
+    `backfill=True` is FIT-09's silent mode: rows are marked backfilled, which is
+    what stops the review path and therefore the Telegram messages. It is a flag
+    on the row rather than a separate code path so the two cannot drift.
+    """
+    outcome = Outcome()
+    try:
+        upstream = client.activities(oldest, newest)
+    except clientmod.IntervalsError as exc:
+        outcome.errors.append(str(exc))
+        return outcome
+
+    known = local_refs(conn, oldest, newest)
+
+    for activity in upstream:
+        outcome.examined += 1
+        activity_id = activity.get("id")
+        if not activity_id:
+            outcome.skipped += 1
+            continue
+
+        # FIT-11 is about what is missing. An activity already stored is left
+        # alone unless we are backfilling, so reconcile stays cheap.
+        if activity_id in known and not backfill:
+            outcome.skipped += 1
+            continue
+
+        file_bytes, streams = (None, None)
+        if fetch_files:
+            file_bytes, streams = fetch_parsed_inputs(client, activity_id)
+
+        try:
+            result = actmod.ingest(
+                conn, activity, tz, file_bytes=file_bytes, streams=streams, backfilled=backfill
+            )
+        except Exception as exc:  # noqa: BLE001 - one bad activity must not stop the run
+            outcome.errors.append(f"{activity_id}: {exc}")
+            continue
+
+        if result.created:
+            outcome.created += 1
+        else:
+            outcome.updated += 1
+
+        if client.last_limit.exhausted:
+            outcome.errors.append("rate limit exhausted; stopping early")
+            break
+
+    if backfill and outcome.changed:
+        recompute_rollups(conn)  # FIT-13
+
+    return outcome
+
+
+def backfill_all(
+    conn: psycopg.Connection,
+    client: clientmod.Intervals,
+    tz: ZoneInfo,
+    since: date,
+    chunk_days: int = 90,
+) -> Outcome:
+    """FIT-09: load history silently, in chunks the rate limiter can survive."""
+    total = Outcome()
+    start = since
+    today = date.today()
+
+    while start <= today:
+        end = min(start + timedelta(days=chunk_days), today)
+        chunk = run(conn, client, tz, start, end, backfill=True)
+        total.examined += chunk.examined
+        total.created += chunk.created
+        total.updated += chunk.updated
+        total.skipped += chunk.skipped
+        total.errors.extend(chunk.errors)
+        if any("rate limit" in e for e in chunk.errors):
+            break
+        start = end + timedelta(days=1)
+
+    recompute_rollups(conn)
+    return total
+
+
+def recompute_rollups(conn: psycopg.Connection) -> int:
+    """FIT-13: rebuild derived rollups now rather than waiting for the night.
+
+    MEM-08 requires these to be SQL rather than model arithmetic, so this is one
+    statement. Only the load figures are populated here; weight trend, adherence
+    and recovery deviation arrive with their own feeds in P04 and P05.
+    """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
+            insert into rollups (as_of, load_7d, load_28d, gym_session_count, computed_at)
+            select d.day,
+                   (select coalesce(sum((s.derived->>'icu_training_load')::numeric), 0)
+                      from sessions s
+                     where s.local_date > d.day - interval '7 days'
+                       and s.local_date <= d.day),
+                   (select coalesce(sum((s.derived->>'icu_training_load')::numeric), 0)
+                      from sessions s
+                     where s.local_date > d.day - interval '28 days'
+                       and s.local_date <= d.day),
+                   (select count(*) from sessions s
+                     where s.discipline in ('weighttraining', 'workout')
+                       and s.local_date > d.day - interval '7 days'
+                       and s.local_date <= d.day),
+                   now()
+              from (select distinct local_date as day from sessions) d
+            on conflict (as_of) do update set
+                load_7d = excluded.load_7d,
+                load_28d = excluded.load_28d,
+                gym_session_count = excluded.gym_session_count,
+                computed_at = excluded.computed_at
+            """
+        )
+        return cur.rowcount

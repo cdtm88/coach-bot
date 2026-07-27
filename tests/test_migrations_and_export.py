@@ -44,14 +44,30 @@ def test_every_design_table_exists(conn: psycopg.Connection) -> None:
     assert expected <= present, f"missing: {sorted(expected - present)}"
 
 
-def test_prescriptions_has_no_session_fk_yet(conn: psycopg.Connection) -> None:
-    """The P00 migration stands alone; the sessions FK lands in P03."""
+def test_prescriptions_session_fk_landed_in_p03(conn: psycopg.Connection) -> None:
+    """P00 deferred this column because `sessions` did not exist yet; 005 adds it.
+
+    Asserting the constraint and not just the column is the point: an integer
+    named session_id that pointed at nothing would satisfy FIT-05's queries right
+    up until a session was deleted.
+    """
     with conn.cursor() as cur:
         cur.execute(
-            "select column_name from information_schema.columns where table_name = 'prescriptions'"
+            """
+            select ccu.table_name as target
+            from information_schema.table_constraints tc
+            join information_schema.key_column_usage kcu
+              on kcu.constraint_name = tc.constraint_name
+            join information_schema.constraint_column_usage ccu
+              on ccu.constraint_name = tc.constraint_name
+            where tc.table_name = 'prescriptions'
+              and tc.constraint_type = 'FOREIGN KEY'
+              and kcu.column_name = 'session_id'
+            """
         )
-        columns = {row["column_name"] for row in cur.fetchall()}
-    assert "session_id" not in columns
+        row = cur.fetchone()
+    assert row is not None, "prescriptions.session_id has no foreign key"
+    assert row["target"] == "sessions"
 
 
 def test_key_namespace_matches_the_design(conn: psycopg.Connection) -> None:
