@@ -23,6 +23,11 @@ ADMIN_URL = os.environ.get(
     "postgresql://coach@/postgres?host=/tmp/pgrun&port=55432",
 )
 
+# The allowlist is required configuration with no default (SEC-03), so the suite
+# supplies one rather than depending on the developer's shell. Tests that assert
+# on the missing-configuration path delete it with monkeypatch.
+os.environ.setdefault("TELEGRAM_ALLOWED_CHAT_ID", "4242")
+
 
 def url_for(dbname: str) -> str:
     """Point the admin connection string at another database.
