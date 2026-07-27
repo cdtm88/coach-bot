@@ -1,0 +1,39 @@
+# The homelab stack of docs/memory-design.md section 11.
+#
+# P00 brings up postgres and applies the schema. The coach-bot, scheduler,
+# ingest and cloudflared services land at the phases that need them (P01, P02,
+# P03 and P03 respectively) and are listed there rather than stubbed here, so
+# `docker compose up` never starts something that does nothing.
+
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: coach
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: coach
+    volumes:
+      - coach-db:/var/lib/postgresql/data
+      - ./backups:/backups
+    # SEC-05: no ports stanza. The database is reachable only from inside this
+    # network, never from the host and never from the internet.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coach -d coach"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    build: .
+    restart: "no"
+    command: ["coach-migrate"]
+    environment:
+      DATABASE_URL: postgresql://coach:${POSTGRES_PASSWORD}@postgres:5432/coach
+      TZ: ${TZ:-UTC}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  coach-db:

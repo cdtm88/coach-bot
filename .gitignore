@@ -1,0 +1,24 @@
+# SEC-01: secrets live in the environment, never in the repository.
+.env
+.env.*
+!.env.example
+
+# Local FIT archive (FIT-15: permanent, backed up, never in git)
+fit-archive/
+
+# Backups and exports (MEM-12)
+backups/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local test Postgres cluster
+.pgdata/

@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      # The suite runs against a real Postgres. The P00 invariants are database
+      # invariants, so an in-memory substitute would test nothing that matters.
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: coach
+          POSTGRES_PASSWORD: coach
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U coach -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgresql://coach:coach@localhost:5432/postgres
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runner's system Python is externally managed, so `uv pip install
+      # --system` refuses to touch it. setup-python provides an interpreter that
+      # is ours to install into.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Install
+        run: uv pip install --system -e ".[dev]"
+
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Test
+        run: pytest -q
