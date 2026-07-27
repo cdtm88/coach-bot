@@ -77,8 +77,9 @@ Roughly 10 minutes
 Roughly 5 minutes
 
 * Create a key scoped to this project so its spend is separable.
-* Set a monthly budget alert at the provider. This is an alert, not a stop.
-* The hard stop is separate and lives in the coach: OBS-07 halts model calls for the day once a daily cap is hit, and says so rather than going silent. Both figures are open item 7 in the PRD and need setting before P12. The nightly consolidation is the largest single cost and you want to see it move.
+* Set a monthly budget alert at the provider for USD 60. This is an alert, not a stop, and it is the number you will actually watch.
+* The hard stop is separate and lives in the coach: OBS-07 halts model calls for the day at USD 3.00 and says so rather than going silent. Set it in `.env`, not in code.
+* The two are deliberately not proportional. Thirty days at the daily cap would be USD 90, above the monthly alert, because the daily figure is a runaway backstop rather than a budget slice. Any sustained overspend trips the monthly alert first, which is the ordering you want; the daily stop only catches a genuine loop. The nightly consolidation is the largest single cost and you want to see it move.
 
 ### Step 6: intervals.icu API and webhook
 
@@ -148,6 +149,7 @@ INTERVALS_ATHLETE_ID=
 INTERVALS_API_KEY=
 INTERVALS_WEBHOOK_SECRET=
 CALENDAR_ICS_URLS=
+DAILY_SPEND_CAP_USD=3.00
 TZ=Asia/Dubai
 ```
 

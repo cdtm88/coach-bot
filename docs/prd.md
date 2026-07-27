@@ -336,7 +336,7 @@ Single user. Cycling primary, gym programmed against movement constraints, gym a
 | OBS-04 | Failures alert to the athlete's allowlisted chat; successes are silent. There is no separate admin chat, because SEC-03 permits exactly one chat id. | A passing night produces no message. |
 | OBS-05 | Each inbound feed carrying a staleness threshold records last success and surfaces staleness: activities, FIT archive, wellness, body mass and calendar. Outbound writes and the conversation itself are not feeds for this purpose. | Feeds table accurate for all five. |
 | OBS-06 | The nightly backup of MEM-12 is verified restorable. | A test restore reproduces both the database and the markdown fact export. |
-| OBS-07 | A daily spend cap enforces a hard stop, independent of the monthly alert. On trip the coach says it is capped rather than going silent. | Simulated runaway usage halts model calls the same day, notifies, and a subsequent message receives an explanation rather than no reply. |
+| OBS-07 | A daily spend cap of USD 3.00 enforces a hard stop, configurable without a code change and independent of the USD 60 monthly alert at the provider. The daily figure is a runaway backstop sized well above ordinary daily spend, not the monthly budget divided by thirty, so a sustained overspend trips the monthly alert long before the daily stop ever fires. On trip the coach says it is capped rather than going silent. | Simulated runaway usage halts model calls the same day, notifies, and a subsequent message receives an explanation rather than no reply. Changing the cap changes the trip point without a deploy. |
 | OBS-08 | Consolidation runs at most once per date and retries at most once on failure. | A failing run cannot loop; the second failure logs and waits for the next night. |
 | OBS-09 | Any single call exceeding a configured token ceiling is rejected before dispatch rather than after billing. | An oversized context is caught pre-flight. |
 
@@ -402,7 +402,7 @@ This is the only open items register. `docs/memory-design.md` section 14 points 
 | 4 | **Verify no activity gaps after the Strava disconnect.** Compare the current activity list against the pre-disconnect snapshot and backfill anything missing from the local FIT archive through the upload endpoint. | P03 | |
 | 5 | **Confirm the manual activity endpoint** against the live swagger spec before committing to it in a phase, per LOG-07. | P10 | |
 | 6 | **Transcription:** hosted API or local model on the homelab. Latency against privacy and running cost. | P11 | |
-| 7 | **Spend caps:** the daily hard stop of OBS-07 and the monthly alert of setup step 5 both need figures. An undefined hard stop is a self inflicted outage. | P12 | Provisional figures acceptable, revised after the first month of OBS-01 data. |
+| 7 | **Resolved. Spend caps:** USD 3.00 daily hard stop in the coach, USD 60 monthly alert at the provider. Written into OBS-07 and setup step 5. | — | Revisit after the first month of OBS-01 data. The daily figure is a runaway backstop, not a thirtieth of the monthly, so the two are deliberately not proportional. |
 | 8 | **Raw message retention period,** and whether consolidated days can be pruned. Nothing currently states how long messages are kept. | P12 | Interacts with OBS-06 backup size. |
 | 9 | **Commit the persona seed.** CHAT-02 requires the source coaching conversation in the repository at `docs/seed/coaching-conversation.md`. | P01 | |
 
