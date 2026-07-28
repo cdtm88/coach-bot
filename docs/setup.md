@@ -144,7 +144,7 @@ Roughly 10 minutes
 
 * Nothing to install. Confirm your full activity history is visible on intervals.icu, then let the backfill run in silent mode.
 * Spot check three older rides against the platform to confirm parsed values match rather than trusting the count of rows loaded.
-* Ride once and confirm the webhook fires end to end. If it does not, the 6 hour reconcile will still catch it, which is exactly the behaviour you want to verify rather than assume.
+* Ride once and confirm it lands. Through the watched folder it should appear within seconds; through the poll, within `COACH_POLL_INTERVAL_S`. If neither, the six hourly sweep is the backstop — verify that rather than assume it. There is no webhook to test.
 
 ### Step 10: Seed memory
 
@@ -196,13 +196,18 @@ Never commit this file. Rotate the Anthropic key and the ingest secret if it is 
 
 #### Processes
 
-`coach-ingest` runs the activity side, as three things in one process:
+`coach-ingest` is the only long-running process, and it runs every inbound feed as loops inside one process:
 
-* The webhook route on `COACH_INGEST_PORT`, bound to loopback — the tunnel is what makes it reachable, so there is no reason for it to listen anywhere else. `GET /health` answers without a secret if you want something for the tunnel to probe.
-* A worker that does the actual downloading, parsing and reviewing. The route only queues; intervals.icu retries any non-2xx with exponential backoff and treats a slow response as a failure, so the response has to be immediate and the work has to happen after it. A delivery that fails is retried on the next pass rather than lost.
-* The six hourly pass: reconcile, watched folder scan, missed session check.
+* **Two HTTP routes** on `COACH_INGEST_PORT`, bound to loopback — the tunnel is what makes them reachable, so there is no reason to listen anywhere else. `POST /macrolog/meals` is MacroLog's; `POST /webhook/intervals` is the idle intervals.icu receiver. `GET /health` answers without a secret if you want something for the tunnel to probe.
+* **The activity poll** (`COACH_POLL_INTERVAL_S`, 120s): asks intervals.icu what is new and scans the watched folder. This is the primary ingest path.
+* **The wellness poll** (`COACH_WELLNESS_INTERVAL_S`, hourly): body mass and recovery. Slower because the feed changes once a day.
+* **The calendar poll** (`COACH_CALENDAR_INTERVAL_S`, six hourly): the secret iCal feeds. Google serves them from a cache, so asking more often buys nothing.
+* **The sweep** (`COACH_SWEEP_INTERVAL_S`, six hourly): ages out prescriptions nothing satisfied.
+* **A drain worker** for the webhook queue, idle unless a webhook is ever configured. The route only queues; a delivery that fails is retried on the next pass rather than lost.
 
 If the process is killed mid-ride, queued deliveries survive in the database and are picked up on restart. Nothing is held in memory that matters.
+
+**Nothing else is runnable yet.** There is no process that answers a Telegram message and no scheduler that runs consolidation at 03:00, because nothing constructs a model client or polls Telegram. See the gap section in `docs/state-of-build.md`; the daily rhythm below describes what the system is designed to do, and the activity, wellness and calendar lines are the parts that actually happen today.
 
 #### Daily, automatic
 

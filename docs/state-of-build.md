@@ -3,7 +3,8 @@
 > Read this first in a new session. It says what is done, what is next, and what
 > the environment does that will otherwise waste your time.
 >
-> Last updated 28 July 2026, at `main` after PR #9 and the P04 branch.
+> Last updated 28 July 2026, at `main` after PR #11. Everything through P07
+> is merged.
 
 ## What is merged
 
@@ -20,21 +21,45 @@
 | P04 | Macros from MacroLog, body mass from wellness (HLTH-01 to HLTH-16) | merged (PR #10) |
 | P05 | Recovery from wellness (RECOV-01 to RECOV-06) | merged (PR #10) |
 | P06 | Calendar feeds (CALR-01 to CALR-06, PLAN-08) | merged (PR #10) |
-| P07 | Training blocks and gym programming (BLOCK, GYM, SAFE-04) | built |
+| P07 | Training blocks and gym programming (BLOCK, GYM, SAFE-04) | merged (PR #11) |
 
 458 tests, all against a real Postgres. Schema is at migration 011.
 
-**M1 and M2 are complete and merged.** P07 is built. Next is **P08** — publishing
-prescriptions to the intervals.icu calendar and detecting athlete edits
-(PLAN-01 to PLAN-12). It is the first phase that writes *upstream*, and it is
-the one V1 gates: run `scripts/verify_intervals.py v1` before starting it, to
-find out whether `oauth_client_id` is populated under a personal API key. If it
-is null, PLAN-05's orphan sweep needs an `external_id` prefix convention
-instead.
+**M1, M2 and P07 are merged.** Next is **P08** — publishing prescriptions to the
+intervals.icu calendar and detecting athlete edits (PLAN-01 to PLAN-12). It is
+the first phase that writes *upstream*, and it is the one V1 gates: **run
+`scripts/verify_intervals.py v1` before starting it**, to find out whether
+`oauth_client_id` is populated under a personal API key. If it is null,
+PLAN-05's orphan sweep needs an `external_id` prefix convention instead, which
+changes the shape of the phase rather than a detail inside it.
 
 Two soak gates are waiting on the athlete and neither blocks P08: HealthBridge
 writing body mass, and the secret iCal addresses in `CALENDAR_ICS_URLS`. Both
 pipelines are built, tested and idle.
+
+## The gap the phase table does not show
+
+**`coach-ingest` is the only process that runs.** Eight phases are merged and
+458 tests pass, and none of that produces a coach the athlete can talk to.
+
+The phases are not at fault. Their requirements are behavioural — the allowlist,
+the backlog catch-up, one question per message, the conflict matrix — and they
+are tested against injected clients and transports, which is the right way to
+test them. What nobody's phase asked for is the wiring at the seams. Three
+pieces are missing, and each is small:
+
+| Missing | Evidence | What it needs |
+| --- | --- | --- |
+| A model client | Nothing in `src/` constructs an `anthropic.Anthropic`; `coach.llm.client` takes one as a parameter. `ANTHROPIC_API_KEY` is configured and read by nobody. | A constructor, wired into `coach.llm.router`. |
+| A Telegram transport | Nothing calls `api.telegram.org`. `coach.telegram.bot` handles the allowlist and the backlog and takes its messages from a caller. `TELEGRAM_BOT_TOKEN` is configured and read by nobody. | A long-poll loop feeding `bot`, and a turn loop: assemble the prompt (`coach.agent.prompt.assemble`), route, dispatch tools, record the reply. |
+| A scheduler | `coach.consolidation.pipeline` has no entry point and nothing calls it. CONS-01 says a nightly job runs at 03:00 local; no job does. The same is true of MEM-12's export and OBS-02's recall suite. | One scheduled process, or a cron entry per job. |
+
+`pyproject.toml` declares three console scripts — `coach-migrate`, `coach-seed`,
+`coach-ingest` — and that list is the honest summary of what can be started.
+
+Worth doing before P08 rather than after. P08 makes the coach write to the
+athlete's calendar, and it would be the first thing he sees from a system he has
+never had a conversation with.
 
 ## How ingest actually works now
 
@@ -236,7 +261,10 @@ Answers whether `oauth_client_id` is populated under a personal API key — the
 documented scoping rule is written for OAuth clients, and if it is null then
 PLAN-05's orphan sweep must use an `external_id` prefix convention instead.
 
-Not urgent. P08 is a long way off.
+**Now urgent: P08 is the next phase.** This was "not urgent, P08 is a long way
+off" until 28 July. It writes, but it cleans up after itself, and the answer
+changes the shape of PLAN-05 rather than a detail inside it — so it is cheaper to
+run first than to discover halfway through.
 
 ## Open items
 
@@ -245,7 +273,7 @@ Not urgent. P08 is a long way off.
 | 1 | Where does the weight in intervals.icu come from? | — | resolved: nowhere, the field is absent |
 | 2 | Who builds HealthBridge, is it needed? | P04 validation | resolved: yes, needed, and it is the athlete's |
 | 3 | Which wellness fields does the Whoop link populate? | — | resolved: six of seven, `hrvSDNN` never |
-| 4 | Verify no activity gaps after the Strava disconnect | — | needs a key; low urgency now that the poll covers Strava-sourced rides |
+| 4 | Verify no activity gaps after the Strava disconnect | — | open, and now runnable: the key works and the poll covers Strava-sourced rides, so this is a comparison nobody has done rather than a blocker |
 | 5 | Manual activity endpoint | — | resolved |
 | 6 | Transcription | P01 polish | open, needs a decision |
 | 7 | Spend caps | — | resolved: $3/day, $60/month |
@@ -314,11 +342,20 @@ docs/memory-design.md    memory tiers, schema, provenance, conflict matrix
 docs/setup.md            accounts, credentials, tunnel, the folder sync
 docs/intervals-api.md    what the API actually does, verified, with dates
 docs/prd-review.md       the v2.1 review and what it changed
-scripts/verify_intervals.py   the three checks above
+docs/seed/               the source coaching conversation; the audit trail for
+                         every seeded fact and for the persona's voice
+scripts/verify_intervals.py   the checks above
 scripts/dev-db.sh        throwaway Postgres for the suite
 
+src/coach/memory/       P00: the store, supersession, provenance, decay
+src/coach/agent/        P01: prompt assembly, the tool surface, naturalness
+src/coach/consolidation/  P02: the nightly pass and the conflict matrix
+src/coach/ingest/       P03: activities, the archive, reviews, the process
 src/coach/health/       P04 and P05: macros, body mass, recovery
 src/coach/calendars/    P06: the iCal feeds and observed availability
+src/coach/blocks/       P07: the constraint gate, the library, load, generation
+
+The README's layout section lists every module with one line on what it is for.
 ```
 
 On conflict: the design wins on schema and memory semantics, the PRD wins on

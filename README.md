@@ -18,6 +18,7 @@ first in a new session.
 | [`docs/setup.md`](docs/setup.md) | Accounts, credentials, tunnel, infrastructure |
 | [`docs/intervals-api.md`](docs/intervals-api.md) | What the intervals.icu API actually does, verified, with dates |
 | [`docs/prd-review.md`](docs/prd-review.md) | Record of the v2.1 review and what it changed |
+| [`docs/seed/`](docs/seed/) | The source coaching conversation. The audit trail for every seeded fact and for the persona's voice |
 
 On conflict: the design wins on schema and memory semantics, the PRD wins on
 scope and acceptance, the setup guide wins on credentials and infrastructure.
@@ -25,7 +26,7 @@ Fix the losing document in the same change (SPEC-02).
 
 ## Status
 
-**P00 to P07 are built; M1 and M2 are merged.** The memory store and its
+**P00 to P07 are merged.** The memory store and its
 invariants, the conversational agent, nightly consolidation, activity ingest with
 session reviews, macros from MacroLog with the body mass trend read from
 intervals.icu wellness, recovery deviation computed against the athlete's own
@@ -42,7 +43,16 @@ the suite, so the first real reading starts a trend with no code change.
 
 **P08 is next** — publishing prescriptions to intervals.icu and detecting athlete
 edits. It is the first phase that writes *upstream*, and the one the V1 check
-gates.
+gates: run `scripts/verify_intervals.py v1` before starting it.
+
+**There is no runnable conversational agent yet, and that is not obvious from the
+phase table.** P01's requirements are behavioural — the allowlist, the catch-up
+rule, the one-question rule — and they are tested against injected transports,
+which is the right way to test them. But nothing in `src/` constructs an
+Anthropic client or polls Telegram, so `ANTHROPIC_API_KEY` and
+`TELEGRAM_BOT_TOKEN` are configured and unread. `coach-ingest` is the only
+long-running process that exists. Wiring those two seams is a small piece of work
+and it is nobody's phase; see `docs/state-of-build.md`.
 
 Ingest needs no webhook. Zwift rides arrive through a watched folder with no API
 call at all; everything else arrives on a poll whose interval is configurable.
@@ -54,7 +64,7 @@ Later phases are in `docs/prd.md` section 4.
 ## Layout
 
 ```
-migrations/        numbered SQL, applied on boot
+migrations/        numbered SQL, applied on boot (001 to 011)
 prompts/persona.md the coach's voice, written from docs/seed/
 seeds/athlete.json the initial facts, each traced to the source transcript
 scripts/
@@ -62,18 +72,32 @@ scripts/
   dev-db.sh            throwaway Postgres for the suite
 src/coach/
   config.py        environment only; no credential defaults (SEC-01)
-  clock.py         local day and week boundaries (TZ-01/02/03)
+  clock.py         local day and week boundaries, and the configured zone (TZ-01/02/03)
   db.py            connections
   migrate.py       the boot-time runner
   seed.py          one-time memory seed from seeds/athlete.json
-  memory/
+  memory/          P00: the store
     keys.py        controlled vocabulary and value typing (MEM-01, MEM-14)
-    facts.py       supersession, provenance, audit, decay
+    facts.py       supersession, provenance, audit, decay, the SAFE-06 path
     notes.py       episodic archive with full text search (MEM-07)
     state.py       working memory and the pending queue (MEM-09, CONS-06)
     context.py     per turn assembly and the shedding order (MEM-10/11/13)
     export.py      the nightly markdown fact export (MEM-12)
-  ingest/
+  agent/           P01: the conversation
+    persona.py     the versioned system prompt (CHAT-02)
+    prompt.py      per turn context assembly; what the coach is told, and when
+    tools.py       the eight tool surface and its dispatch (CHAT-06)
+    naturalness.py the behavioural checks: narration, questions, diagnosis, HLTH-09
+    interruptions.py  one interruption per conversation, claimed by priority (CHAT-11)
+  llm/             model routing and accounting
+    client.py      streaming, token accounting, cost per call (OBS-01)
+    router.py      light model for chat, heavy for consolidation (MODEL-01/02/03)
+  telegram/
+    bot.py         allowlist, backlog catch-up, message persistence. No transport yet
+  consolidation/   P02: the nightly pass
+    pipeline.py    read the day, emit diffs, ratify what the matrix allows
+    conflict.py    the conflict resolution matrix, in code not in the model (CONS-03)
+  ingest/          P03: activities
     parse.py       samples in, computed values out; never a derived aggregate
     client.py      the intervals.icu API, basic auth, rate limit headers
     activities.py  an upstream activity to a session row
@@ -82,18 +106,18 @@ src/coach/
     reconcile.py   the poll and the bulk backfill
     service.py     the pipeline every ingest path calls
     webhook.py     the receiver and its delivery queue; idle without an app
-    server.py      the process: routes, poll, wellness, sweep, queue worker
-  health/
+    server.py      the process: routes, activity poll, wellness, calendar, sweep
+  health/          P04 and P05: intake, body mass, recovery
     macros.py      per-meal macros from MacroLog, idempotent on the meal id
-    wellness.py    the wellness read: body mass, and P05's recovery fields
+    wellness.py    the wellness read, and the fields it deliberately never stores
     bodymass.py    readings, the outlier gate, the gap, the rollup
-    recovery.py    the local deviation; the platform's score never an input
     trend.py       the weighted fit in SQL, and what it permits the coach to say
+    recovery.py    the local deviation; the platform's score never an input
     breaks.py      is today inside a break; the rest of BREAK-* lands in P10
-  calendars/
+  calendars/       P06: busy time
     feed.py        secret iCal feeds; the URL is never stored and never logged
     availability.py  busy blocks to observed availability, through consolidation
-  blocks/
+  blocks/          P07: programming
     constraints.py the gate: what the athlete may not be asked to do (SAFE-04)
     library.py     the exercise library and substitution (GYM-03)
     load.py        one scale for cycling and gym, and the weekly ceiling
@@ -119,7 +143,11 @@ uv run pytest -q               # 458 passing
 `TEST_DATABASE_URL` overrides the connection if you would rather point at your
 own instance.
 
-## Two rules worth knowing before reading the code
+## What to know before reading the code
+
+Five rules run through every phase. They are here rather than in the design
+document because they explain why the code is shaped as it is, and each one was
+paid for at least once.
 
 **The system may reduce load autonomously and may never increase it.** Every
 requirement touching prescriptions inherits this. It is why `ADJ-02` rejects any
