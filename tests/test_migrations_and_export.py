@@ -138,6 +138,42 @@ def test_export_flags_low_confidence(conn: psycopg.Connection, tmp_path: Path) -
     assert "⚠" in body
 
 
+def _example_env() -> dict[str, str]:
+    """`.env.example` parsed the way a dotenv loader would.
+
+    Raises rather than skipping a malformed line, which is the point: a line that
+    does not parse is one a reader would copy into `.env` and lose.
+    """
+    entries: dict[str, str] = {}
+    for lineno, raw in enumerate((REPO / ".env.example").read_text().splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        assert "=" in line, f".env.example:{lineno} is neither comment nor assignment: {line!r}"
+        key, value = line.split("=", 1)
+        assert re.fullmatch(r"[A-Z][A-Z0-9_]*", key), f".env.example:{lineno} bad key {key!r}"
+        entries[key] = value
+    return entries
+
+
+def test_env_example_documents_every_variable_the_code_reads() -> None:
+    """A variable src/ reads and the template omits is a silent misconfiguration.
+
+    Every one of these is read with a default, so an omission does not fail on
+    startup — it runs with the wrong value. `COACH_TZ` is the sharp case: absent,
+    `clock.configured_tz` falls back to UTC and TZ-01's day and week boundaries
+    are quietly computed in the wrong zone for an athlete in Dubai. This caught
+    exactly that, after a docs edit landed mid-line and ate the assignment.
+    """
+    read = set()
+    for path in (REPO / "src").rglob("*.py"):
+        read |= set(re.findall(r'os\.environ[.a-z]*[(\[]"([A-Z][A-Z0-9_]*)"', path.read_text()))
+
+    assert read, "the scan found no environment reads at all, so it is not testing anything"
+    missing = sorted(read - _example_env().keys())
+    assert not missing, f".env.example does not document: {missing}"
+
+
 def test_no_credentials_in_the_repository() -> None:
     """SEC-01: a repository scan finds no credentials.
 
