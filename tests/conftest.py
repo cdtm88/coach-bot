@@ -79,6 +79,27 @@ def conn(template_db: str) -> Iterator[psycopg.Connection]:
             admin.execute(f'drop database if exists "{name}" with (force)')
 
 
+def ensure_block(conn: psycopg.Connection) -> int:
+    """A block for a prescription to hang off, created once per connection.
+
+    P07 added the foreign key P00 deferred: `prescriptions.block_id` now
+    references a real row, because a prescription without a block is an orphan
+    that PLAN-05 would sweep upstream anyway. Tests about ingest are not tests
+    about blocks, so this creates the least block that satisfies the constraint
+    rather than going through `document.create` and its BLOCK-05 goals.
+    """
+    with conn.cursor() as cur:
+        cur.execute("select id from blocks order by id limit 1")
+        row = cur.fetchone()
+        if row:
+            return row["id"]
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "insert into blocks (title, starts_on) values ('test block', '2026-07-01') returning id"
+        )
+        return cur.fetchone()["id"]
+
+
 # --- shared ingest fixtures -------------------------------------------------
 #
 # Here rather than in one test module because two modules exercise the same

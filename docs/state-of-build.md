@@ -17,19 +17,24 @@
 | — | Seven ingest defect fixes found by reviewing against the live API (PR #7) | merged |
 | — | Poll-based ingest; the webhook dependency is gone (PR #8) | merged |
 | — | Handover doc and the three scripted live checks (PR #9) | merged |
-| P04 | Macros from MacroLog, body mass from wellness (HLTH-01 to HLTH-16) | built |
-| P05 | Recovery from wellness (RECOV-01 to RECOV-06) | built |
-| P06 | Calendar feeds (CALR-01 to CALR-06, PLAN-08) | built |
+| P04 | Macros from MacroLog, body mass from wellness (HLTH-01 to HLTH-16) | merged (PR #10) |
+| P05 | Recovery from wellness (RECOV-01 to RECOV-06) | merged (PR #10) |
+| P06 | Calendar feeds (CALR-01 to CALR-06, PLAN-08) | merged (PR #10) |
+| P07 | Training blocks and gym programming (BLOCK, GYM, SAFE-04) | built |
 
-405 tests, all against a real Postgres. Schema is at migration 009.
+458 tests, all against a real Postgres. Schema is at migration 011.
 
-**M2 is complete.** Next is **P07** — four week training blocks with cycling and
-gym prescriptions (BLOCK-01 to BLOCK-08, GYM-01 to GYM-08, SAFE-04), the first
-phase of M3 and the first that writes rather than reads.
+**M1 and M2 are complete and merged.** P07 is built. Next is **P08** — publishing
+prescriptions to the intervals.icu calendar and detecting athlete edits
+(PLAN-01 to PLAN-12). It is the first phase that writes *upstream*, and it is
+the one V1 gates: run `scripts/verify_intervals.py v1` before starting it, to
+find out whether `oauth_client_id` is populated under a personal API key. If it
+is null, PLAN-05's orphan sweep needs an `external_id` prefix convention
+instead.
 
-P06's soak gate needs the athlete to paste his secret iCal addresses into
-`CALENDAR_ICS_URLS`. Until then the loop runs and finds nothing, which is the
-same shape as the body mass pipeline: built, tested, waiting for its source.
+Two soak gates are waiting on the athlete and neither blocks P08: HealthBridge
+writing body mass, and the secret iCal addresses in `CALENDAR_ICS_URLS`. Both
+pipelines are built, tested and idle.
 
 ## How ingest actually works now
 
@@ -132,6 +137,47 @@ database at all — a secret in a column is a secret in the nightly pg_dump — 
 `httpx` logs the request URL at INFO on every call, so a redacting filter is
 installed on that library's logger. Being careful in our own log lines would not
 have been enough.
+
+## How block generation works, and the one rule that is stricter than the PRD
+
+P07 is the first phase that writes, so it is the first where the governing
+asymmetry has teeth: the system may reduce load autonomously and may never
+increase it autonomously.
+
+**The model writes the shape, the code writes the rows.** A plan says "Thursday,
+gym, lower body, RPE 7". It never names an exercise, because GYM-02 is not a rule
+a model can be trusted to remember on a Thursday in week three. The movement is
+chosen from the library, against the constraints, or it is not prescribed at all.
+
+**Nothing is written until the whole block validates.** A generation that
+breaches the BLOCK-07 ramp in week four must not leave weeks one to three in the
+database, so prescriptions are built in memory, checked, and inserted in one
+transaction. That is also what makes BLOCK-08's restructure safe.
+
+**An unreadable constraint refuses to generate.** This is the decision to argue
+with if you are going to argue with one. If a constraint phrase matches nothing
+in the movement vocabulary, gym generation raises rather than proceeding as
+though the athlete were unconstrained. Ignoring what we could not parse means a
+constraint he stated in his own words silently stops applying and he has no way
+to notice. The PRD does not require this; GYM-02 says an excluded pattern is
+*never* prescribed, and this is what that costs.
+
+It nearly bit immediately, which is the point: the first run refused on **his own
+seeded constraint**, because "no sit-ups" did not match the vocabulary entry
+"sit up". The fix was to widen the matcher for hyphens and plurals. The fix is
+never to reword the athlete's constraint.
+
+**The trunk is three patterns, not one.** Flexion and loaded rotation are
+excluded by his restrictions; anti-extension and anti-rotation are exactly what a
+repaired disc wants. Collapsing them into "core" would have banned the useful
+half along with the harmful half.
+
+**A substitution that preserves nothing is worse than a gap.** The wide fallback
+in `library.substitute` was removed after it answered a blocked squat with a calf
+raise. GYM-03's acceptance is about the *equipment* case, which same-pattern
+substitution serves; when a pattern and all its near neighbours are excluded, the
+truthful answer is that there is nothing appropriate, recorded as a
+`constraint_blocks` row with no substitution.
 
 ## What the live checks found
 
