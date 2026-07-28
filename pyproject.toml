@@ -33,6 +33,11 @@ dev = [
 coach-migrate = "coach.migrate:main"
 coach-seed = "coach.seed:main"
 coach-ingest = "coach.ingest.server:main"
+# The conversational process: Telegram long poll, one turn per backlog.
+coach-agent = "coach.runtime.agent:main"
+# The nightly process: decay, the fact export, and consolidation once a
+# proposer is wired. See docs/state-of-build.md.
+coach-scheduler = "coach.runtime.scheduler:main"
 
 [build-system]
 requires = ["hatchling"]

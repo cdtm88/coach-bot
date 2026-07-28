@@ -207,14 +207,18 @@ Never commit this file. Rotate the Anthropic key and the ingest secret if it is 
 
 If the process is killed mid-ride, queued deliveries survive in the database and are picked up on restart. Nothing is held in memory that matters.
 
-**Nothing else is runnable yet.** There is no process that answers a Telegram message and no scheduler that runs consolidation at 03:00, because nothing constructs a model client or polls Telegram. See the gap section in `docs/state-of-build.md`; the daily rhythm below describes what the system is designed to do, and the activity, wellness and calendar lines are the parts that actually happen today.
+`coach-agent` is the conversation: a Telegram long poll, and one turn per backlog. It needs `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHAT_ID` and `ANTHROPIC_API_KEY`, and refuses to start without them rather than dying on your first message.
+
+`coach-scheduler` is the nightly work, on your local 03:00 rather than UTC. It runs confidence decay and the markdown fact export. **It does not yet run consolidation** — CONS-02's diff prompt has not been written — and it says so in a warning on startup rather than pretending. A night missed because the process was down runs when it comes back, which is why this is a loop rather than a cron entry.
+
+Run all three. Only `coach-ingest` needs the tunnel.
 
 #### Daily, automatic
 
 * Zwift rides arrive through the watched folder within seconds of the file syncing. Everything else arrives on the poll, by default within two minutes. A session review follows either way, inside the five minute budget.
 * MacroLog posts macros as you log meals, and body mass to intervals.icu wellness; the coach reads wellness back hourly (`COACH_WELLNESS_INTERVAL_S`) and re-reading is free, so a late provider fill-in is picked up regardless.
 * Calendar feeds fetch every six hours; planned sessions publish to intervals.icu on block change.
-* Consolidation runs at 03:00, then the recall suite and linter.
+* Decay and the fact export run at 03:00 local. Consolidation, the recall suite and the linter are not wired yet — see `docs/state-of-build.md`.
 
 #### Weekly, yours
 

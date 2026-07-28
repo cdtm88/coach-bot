@@ -26,12 +26,12 @@ Fix the losing document in the same change (SPEC-02).
 
 ## Status
 
-**P00 to P07 are merged.** The memory store and its
+**P00 to P07 are merged, and the system runs.** The memory store and its
 invariants, the conversational agent, nightly consolidation, activity ingest with
 session reviews, macros from MacroLog with the body mass trend read from
 intervals.icu wellness, recovery deviation computed against the athlete's own
 baseline, the calendar feeds, and now four week training blocks with cycling and
-gym prescriptions behind a constraint gate. 458 tests, all against a real
+gym prescriptions behind a constraint gate. 499 tests, all against a real
 Postgres.
 
 The live checks that gated P04 were run on 28 July 2026 and the headline is that
@@ -45,14 +45,16 @@ the suite, so the first real reading starts a trend with no code change.
 edits. It is the first phase that writes *upstream*, and the one the V1 check
 gates: run `scripts/verify_intervals.py v1` before starting it.
 
-**There is no runnable conversational agent yet, and that is not obvious from the
-phase table.** P01's requirements are behavioural — the allowlist, the catch-up
-rule, the one-question rule — and they are tested against injected transports,
-which is the right way to test them. But nothing in `src/` constructs an
-Anthropic client or polls Telegram, so `ANTHROPIC_API_KEY` and
-`TELEGRAM_BOT_TOKEN` are configured and unread. `coach-ingest` is the only
-long-running process that exists. Wiring those two seams is a small piece of work
-and it is nobody's phase; see `docs/state-of-build.md`.
+Three processes run it: `coach-ingest` for every inbound feed, `coach-agent` for
+the conversation, `coach-scheduler` for the nightly jobs. Until recently only the
+first existed — the phases were merged and tested against injected clients and
+transports, and nobody's phase owned the wiring at the seams. `src/coach/runtime/`
+is that wiring, and it decides nothing: every rule it applies already had a home.
+
+One thing is still unwired and is called out rather than hidden: the scheduler
+does not run consolidation, because CONS-02's strict-JSON diff prompt has not
+been written. It runs decay and the fact export, and logs a warning about the
+third. See `docs/state-of-build.md`.
 
 Ingest needs no webhook. Zwift rides arrive through a watched folder with no API
 call at all; everything else arrives on a poll whose interval is configurable.
@@ -123,6 +125,12 @@ src/coach/
     load.py        one scale for cycling and gym, and the weekly ceiling
     document.py    the versioned block markdown (BLOCK-01, BLOCK-02)
     generate.py    a plan to prescriptions, validated before anything is written
+  runtime/         the wiring: what makes the phases into running processes
+    models.py      the only place an Anthropic client is built, and the spend guard
+    transport.py   the only place that talks to Telegram
+    turn.py        one inbound message to one sent reply
+    agent.py       the conversational process (coach-agent)
+    scheduler.py   the nightly process (coach-scheduler)
 tests/             the acceptance criteria, as assertions
 ```
 
@@ -136,7 +144,7 @@ matters.
 ```bash
 uv sync --extra dev
 ./scripts/dev-db.sh start      # prints TEST_DATABASE_URL; export it
-uv run pytest -q               # 458 passing
+uv run pytest -q               # 499 passing
 ./scripts/dev-db.sh stop
 ```
 

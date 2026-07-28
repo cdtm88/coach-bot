@@ -23,9 +23,11 @@
 | P06 | Calendar feeds (CALR-01 to CALR-06, PLAN-08) | merged (PR #10) |
 | P07 | Training blocks and gym programming (BLOCK, GYM, SAFE-04) | merged (PR #11) |
 
-458 tests, all against a real Postgres. Schema is at migration 011.
+499 tests, all against a real Postgres. Schema is at migration 011; the
+scheduler's own ledger is created on first use rather than as a migration,
+because it is process bookkeeping rather than part of the memory design.
 
-**M1, M2 and P07 are merged.** Next is **P08** — publishing prescriptions to the
+**M1, M2 and P07 are merged, and the system now runs.** Next is **P08** — publishing prescriptions to the
 intervals.icu calendar and detecting athlete edits (PLAN-01 to PLAN-12). It is
 the first phase that writes *upstream*, and it is the one V1 gates: **run
 `scripts/verify_intervals.py v1` before starting it**, to find out whether
@@ -37,29 +39,55 @@ Two soak gates are waiting on the athlete and neither blocks P08: HealthBridge
 writing body mass, and the secret iCal addresses in `CALENDAR_ICS_URLS`. Both
 pipelines are built, tested and idle.
 
-## The gap the phase table does not show
+## What runs
 
-**`coach-ingest` is the only process that runs.** Eight phases are merged and
-458 tests pass, and none of that produces a coach the athlete can talk to.
+Three processes, all console scripts:
 
-The phases are not at fault. Their requirements are behavioural — the allowlist,
-the backlog catch-up, one question per message, the conflict matrix — and they
-are tested against injected clients and transports, which is the right way to
-test them. What nobody's phase asked for is the wiring at the seams. Three
-pieces are missing, and each is small:
+| Process | What it does |
+| --- | --- |
+| `coach-ingest` | Every inbound feed: two HTTP routes, the activity poll, wellness, calendar, the sweep, and the webhook drain. |
+| `coach-agent` | Telegram long poll, one turn per backlog. |
+| `coach-scheduler` | The nightly jobs on the athlete's local 03:00. |
 
-| Missing | Evidence | What it needs |
-| --- | --- | --- |
-| A model client | Nothing in `src/` constructs an `anthropic.Anthropic`; `coach.llm.client` takes one as a parameter. `ANTHROPIC_API_KEY` is configured and read by nobody. | A constructor, wired into `coach.llm.router`. |
-| A Telegram transport | Nothing calls `api.telegram.org`. `coach.telegram.bot` handles the allowlist and the backlog and takes its messages from a caller. `TELEGRAM_BOT_TOKEN` is configured and read by nobody. | A long-poll loop feeding `bot`, and a turn loop: assemble the prompt (`coach.agent.prompt.assemble`), route, dispatch tools, record the reply. |
-| A scheduler | `coach.consolidation.pipeline` has no entry point and nothing calls it. CONS-01 says a nightly job runs at 03:00 local; no job does. The same is true of MEM-12's export and OBS-02's recall suite. | One scheduled process, or a cron entry per job. |
+**This is new, and it closed a gap the phase table could not show.** Until 28
+July `coach-ingest` was the only one. Eight phases were merged and 458 tests
+passed, and none of it produced a coach the athlete could talk to: nothing
+constructed an `anthropic.Anthropic`, nothing called `api.telegram.org`, and
+`consolidation.pipeline` had no caller. `ANTHROPIC_API_KEY` and
+`TELEGRAM_BOT_TOKEN` were configured and read by nobody.
 
-`pyproject.toml` declares three console scripts — `coach-migrate`, `coach-seed`,
-`coach-ingest` — and that list is the honest summary of what can be started.
+No phase was at fault. Those requirements are behavioural and are tested against
+injected clients and transports, which is the right way to test them. The wiring
+at each seam was simply nobody's phase. `src/coach/runtime/` is where it lives
+now, and it holds no opinions: every rule it applies — the interruption budget,
+the naturalness checks, the conflict matrix — already had a home, and this calls
+them in order.
 
-Worth doing before P08 rather than after. P08 makes the coach write to the
-athlete's calendar, and it would be the first thing he sees from a system he has
-never had a conversation with.
+### What is still not wired
+
+**The consolidation proposer.** `coach-scheduler` runs decay and the fact export;
+it does not run consolidation, because CONS-02's strict-JSON diff prompt does not
+exist. `scheduler.consolidation_job(propose)` takes a proposer and there is
+nothing to pass it. That is P02's remaining half and it belongs with the
+pipeline, not with the scheduler. The process logs a warning saying so on
+startup rather than pretending.
+
+**Streaming to Telegram.** PERF-01 measures time to first token and the turn loop
+accepts an `on_text` callback, but the agent does not pass one — Telegram has no
+partial-message API worth the complexity, so the reply is sent whole. Revisit if
+PERF-01's p95 becomes a real complaint rather than a number.
+
+### One requirement built early, on purpose
+
+OBS-07's daily spend cap is a P12 requirement. The *stop* is implemented now, in
+`runtime.models.check_spend`, because this is the change that first lets the
+system call a model on a loop and a runaway before P12 would be a real bill. The
+check is a query against `model_calls`, which P01 already writes.
+
+What is implemented is the stop and the coach saying it is capped. The
+notification and the wider OBS-07 acceptance are still P12's. A test asserts the
+single construction site for the client, so the guard has nowhere to be routed
+around.
 
 ## How ingest actually works now
 
