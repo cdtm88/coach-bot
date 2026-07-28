@@ -122,9 +122,10 @@ Roughly 10 minutes
 
 Roughly 30 minutes
 
-* Commit the source coaching conversation to `docs/seed/coaching-conversation.md` first. CHAT-02 requires it in the repository, and P01 cannot start without it (open item 9).
-* Review the persona system prompt extracted from it, at `prompts/persona.md`, before it is loaded. It sets the tone for years.
-* Review the seeded facts, especially constraints. Anything wrong here propagates everywhere and constraints cannot be corrected automatically by design.
+* The source coaching conversation is committed at `docs/seed/coaching-conversation.md`, and both artefacts below derive from it. It is the audit trail; read it before changing either.
+* Review `prompts/persona.md`, written from that conversation's voice, before it is loaded. It sets the tone for years.
+* Review `seeds/athlete.json`, especially the constraints. Anything wrong here propagates everywhere, and constraints cannot be corrected automatically by design: only you can change one, and only by saying so. Every entry carries a `reason` you can check against the transcript.
+* Apply it with `coach-seed` once the schema is migrated. Re-running is safe: a value already current is left alone rather than superseded.
 * Confirm the starting block and let it publish to the calendar.
 
 ### Step 11: Verify

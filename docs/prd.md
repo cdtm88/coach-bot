@@ -112,8 +112,8 @@ Single user. Cycling primary, gym programmed against movement constraints, gym a
 
 | ID | Requirement | Acceptance |
 | --- | --- | --- |
-| FIT-01 | Activity ingest is triggered by an intervals.icu webhook on upload, with a scheduled reconcile every 6 hours as backstop. | A new Zwift ride appears as a session row within 2 minutes without polling. |
-| FIT-02 | Webhook payloads are signature verified and replay safe. | An unsigned or replayed payload is rejected and logged. |
+| FIT-01 | Activity ingest is triggered by the intervals.icu `ACTIVITY_UPLOADED` webhook, with a scheduled reconcile every 6 hours as backstop. Not `ACTIVITY_ANALYZED`, which is held 60 seconds to consolidate events and would spend a fifth of the PERF-03 budget before work starts. | A new Zwift ride appears as a session row within 2 minutes without polling. |
+| FIT-02 | Webhook payloads are verified against the shared secret carried in the body, in constant time, and are replay safe. There is no HMAC signature to check: intervals.icu authenticates the callback with a secret in the payload, so replay safety comes from the event timestamp and the FIT-04 deduplication rather than from the transport. | A payload with a wrong or absent secret is rejected and logged, and a replayed payload creates no second session. |
 | FIT-03 | The original activity file is downloaded and parsed; intervals.icu derived fields are stored alongside but never substituted for parsed values. | Session row contains both parsed streams and the platform's derived load. |
 | FIT-04 | Deduplication uses the intervals.icu activity id and a content hash. | Re-delivering a webhook creates no second session. |
 | FIT-05 | Sessions are matched to a prescription by date and discipline where one exists, and compliance is computed. | Matched session sets prescription status to completed with duration and intensity deltas. |
@@ -188,14 +188,14 @@ Single user. Cycling primary, gym programmed against movement constraints, gym a
 | ID | Requirement | Acceptance |
 | --- | --- | --- |
 | PLAN-01 | Prescriptions publish as planned workouts on the intervals.icu calendar using the same API key as ingest. | A generated block appears as planned events upstream. |
-| PLAN-02 | Each planned event carries a stable coach id for idempotent update and cancellation. | Changing a prescription twice leaves exactly one planned event. |
+| PLAN-02 | Each planned event carries a stable coach id in the upstream `external_id` field, published through `POST /events/bulk?upsert=true`, which creates or updates and matches the id only against events this application created. | Changing a prescription twice leaves exactly one planned event. |
 | PLAN-03 | Event description carries duration, intensity target, route where relevant, and the purpose of the session. | All present on every published event. |
 | PLAN-04 | Sessions are never planned into busy time visible in the calendar feeds at the moment of scheduling. Commitments the feed has not yet published are governed by CALR-05. | Seeded conflict causes a move or shortening, not an overlap. |
 | PLAN-05 | Orphan planned events carrying a coach id with no matching prescription are removed on the nightly pass. | Seeded orphan is gone after the job. |
 | PLAN-06 | Athlete edits to planned events upstream are detected and recorded as observed evidence. | Moving a planned session twice on the same weekday updates availability with observed provenance. |
 | PLAN-07 | Planned versus completed matching uses the upstream pairing where available, falling back to local date and discipline matching. | Compliance resolves correctly under both paths. |
 | PLAN-08 | The system never writes to any Google calendar. | No write path to Google exists in the codebase. |
-| PLAN-09 | Structured sessions publish as machine readable workout steps with duration and power targets, not prose descriptions. | The platform renders a published session as a valid zwo with the intended intervals. The coach produces the step list and never the file, per PLAN-10. |
+| PLAN-09 | Structured sessions publish as machine readable workout steps with duration and power targets, not prose descriptions, using native intervals.icu workout text in the event `description`. The API also accepts a base64 zwo, fit, mrc or erg file; the text form is preferred because it needs no file generation at all. | The platform renders a published session as a valid zwo with the intended intervals. The coach produces the step list and never the file, per PLAN-10. |
 | PLAN-10 | Delivery of planned workouts into Zwift is handled by the upstream platform integration; the coach never generates workout files itself. | A session prescribed on the coach appears in Zwift without any file handling. |
 | PLAN-11 | Unstructured sessions (endurance rides, gym, golf) publish with duration and purpose only and are not exported as workout files. | A steady endurance prescription publishes without a structured step list. |
 | PLAN-12 | An athlete edit upstream updates the local prescription to match, so the two never diverge. | Moving a planned session upstream changes the local prescription date within one sync. |
@@ -303,7 +303,7 @@ Single user. Cycling primary, gym programmed against movement constraints, gym a
 | LOG-04 | Elicitation is conversational, one question at a time, never a form. | No capture turn contains more than one question. |
 | LOG-05 | Conversationally captured sessions create local session rows and count toward weekly load and adherence. | A logged gym session appears in rollups. |
 | LOG-06 | The coach writes a corresponding manual activity to intervals.icu so the training load chart stays complete. Lower priority: nothing depends on it. | A captured session appears upstream, or fails without affecting the local record. |
-| LOG-07 | The manual activity endpoint is verified against the live swagger spec before implementation; if unavailable, a minimal TCX is generated server side and posted as a multipart upload. | Whichever path is used is documented in the phase notes. |
+| LOG-07 | Gym sessions and golf rounds post upstream through `POST /api/v1/athlete/{id}/activities/manual`, verified present in the live spec on 27 July 2026 and documented in `docs/intervals-api.md`. It accepts JSON against the Activity schema, so the TCX multipart fallback this requirement once carried is dropped. | A session logged in chat appears upstream as an activity. |
 | LOG-08 | Upstream write failure never blocks or delays the local record or the conversation. | Simulated upstream outage leaves capture working. |
 
 ### Nutrition guidance
@@ -350,7 +350,7 @@ Single user. Cycling primary, gym programmed against movement constraints, gym a
 | SEC-01 | All secrets live in environment variables, never in the repository. | Repository scan finds no credentials. |
 | SEC-02 | Inbound webhook and ingest endpoints verify a shared secret or provider signature. | Unsigned requests rejected. |
 | SEC-03 | Only the allowlisted Telegram chat id can interact with the bot. | Verified with a second account. |
-| SEC-04 | No OAuth flow exists anywhere in the system. All upstream access is by API key or secret URL held in the environment. | Codebase contains no OAuth client or token refresh logic. |
+| SEC-04 | The system implements no OAuth flow. All upstream access at runtime is by API key or secret URL held in the environment. The one exception is a single human action outside the system: intervals.icu attaches webhooks to an OAuth application, so the app is authorised once in a browser and the resulting bearer token is pasted into the environment. intervals.icu issues no refresh tokens and the access token does not expire, so there is nothing to renew. | Codebase contains no OAuth client, redirect handler or token refresh logic. |
 | SEC-05 | The database is not exposed to the public internet; only the tunnel exposes named ingest routes. | Port scan from outside shows no database port. |
 
 ## 4. Phase plan
@@ -398,13 +398,15 @@ This is the only open items register. `docs/memory-design.md` section 14 points 
 | --- | --- | --- | --- |
 | 1 | **Where is the weight in intervals.icu coming from?** Read wellness across the last two weeks. If the value is identical on every date it is a static profile field copied from upstream, which is actively harmful because the coach would anchor on a stale number and never notice. If it moves day to day, something already feeds it correctly. | P04 | Resolves item 2 with it. |
 | 2 | **Who builds HealthBridge, and is it needed?** It is a module inside MacroLog, not this repository, and no requirement here covers it. If item 1 resolves toward building it, it is a prerequisite of P04 and belongs on the athlete's side of the setup guide's division of labour. If weight already moves day to day, it is dropped entirely. | P04 | Out of scope for this repo either way. |
-| 3 | **Does the wellness payload carry all six RECOV-02 fields?** Check a recent day before P05. Any missing field is dropped from the deviation calculation per RECOV-02. A direct Whoop integration is not an available remedy. | P05 | RECOV-03 and SEC-04 bind. |
+| 3 | **Does the athlete's wellness feed populate all six RECOV-02 fields?** The API schema carries all six plus `weight`, verified 27 July 2026 (`docs/intervals-api.md`), so the remaining question is only what his Whoop link actually fills in. Needs one authenticated range read. Any field left null is dropped from the deviation calculation per RECOV-02; a direct Whoop integration is not an available remedy. | P05 | RECOV-03 and SEC-04 bind. |
 | 4 | **Verify no activity gaps after the Strava disconnect.** Compare the current activity list against the pre-disconnect snapshot and backfill anything missing from the local FIT archive through the upload endpoint. | P03 | |
-| 5 | **Confirm the manual activity endpoint** against the live swagger spec before committing to it in a phase, per LOG-07. | P10 | |
+| 5 | **Resolved. Manual activity endpoint** exists and takes JSON: `POST /api/v1/athlete/{id}/activities/manual`. LOG-07 simplified and the TCX fallback dropped. | — | Verified 27 July 2026 against the live spec. |
 | 6 | **Transcription:** hosted API or local model on the homelab. Latency against privacy and running cost. | P11 | |
 | 7 | **Resolved. Spend caps:** USD 3.00 daily hard stop in the coach, USD 60 monthly alert at the provider. Written into OBS-07 and setup step 5. | — | Revisit after the first month of OBS-01 data. The daily figure is a runaway backstop, not a thirtieth of the monthly, so the two are deliberately not proportional. |
 | 8 | **Raw message retention period,** and whether consolidated days can be pruned. Nothing currently states how long messages are kept. | P12 | Interacts with OBS-06 backup size. |
-| 9 | **Commit the persona seed.** CHAT-02 requires the source coaching conversation in the repository at `docs/seed/coaching-conversation.md`. | P01 | |
+| 9 | **Resolved. Persona seed.** The source coaching conversation is committed at `docs/seed/coaching-conversation.md`; `prompts/persona.md` is written from it and `seeds/athlete.json` carries the facts it establishes. | — | The transcript is the audit trail for every seeded value. Re-read it before changing the persona's voice. |
+| 10 | **Resolved. Webhooks exist**, outside the OpenAPI spec: registered in the app management UI (`/settings`, then Manage App), delivering `ACTIVITY_UPLOADED`, `CALENDAR_UPDATED` and `SPORT_SETTINGS_UPDATED`. FIT-01, FIT-02, PLAN-02 and PLAN-09 updated against what they actually do. | — | Verified 27 July 2026 from the official integration cookbook. **Activity webhooks are not delivered for Strava activities**, so reconnecting Strava would silently disable ingest. See item 4 and `docs/intervals-api.md`. |
+| 11 | **Register the OAuth app and authorise it once.** Webhooks attach to an app, so: email intervals.icu with the app details, authorise it against the athlete's own account in a browser, point the webhook at the tunnel route, and put the webhook secret in `.env` as `INTERVALS_WEBHOOK_SECRET`. No code follows from this — the token does not expire and there are no refresh tokens, so SEC-04's acceptance is unaffected. Note that re-authorising discards the previous token, so redoing the consent later means updating `.env`. | P03 | SEC-04 amended to state the one time consent plainly. See `docs/intervals-api.md`. |
 
 
 181 requirements across 24 domains in 23 sections.
