@@ -1,9 +1,14 @@
-"""The ingest path from a webhook event to a written review.
+"""The ingest path from a new activity to a written review.
 
-FIT-01 names two triggers and this module is what both of them call: the
-`ACTIVITY_UPLOADED` webhook, and the six hourly reconcile that catches whatever
-the webhook dropped. FIT-14's watched folder is the third caller, on the same
-tick as the reconcile.
+Three callers reach this, and FIT-01 no longer prefers one of them on principle:
+
+* :func:`poll` — the fast loop. Asks intervals.icu what is new and scans the
+  watched folder. This is the primary path, because webhooks need a registered
+  app and that dependency was not worth blocking ingest on.
+* :func:`drain` — the webhook queue, idle unless an app is ever registered. Built
+  and tested, so switching it on is configuration rather than code.
+* :func:`sweep` — the slow loop, for the one job that has nothing to gain from
+  running often.
 
 Keeping the pipeline here rather than in the HTTP handler is deliberate. PERF-03
 gives five minutes from file arrival to review, and almost all of that budget is
@@ -35,6 +40,11 @@ from coach.ingest import review as reviewmod
 from coach.ingest import webhook as webhookmod
 
 log = logging.getLogger(__name__)
+
+# How far back the fast poll asks for. Short on purpose: running every couple of
+# minutes, anything older than this is either already stored or is the wide
+# sweep's problem. Widening it makes every poll carry more rows for no gain.
+POLL_LOOKBACK_DAYS = 2
 
 
 def no_review(_context: dict[str, Any]) -> str:
@@ -233,25 +243,42 @@ def tick(
     write_note: Callable[[dict[str, Any]], str] = no_review,
     lookback_days: int = 14,
 ) -> dict[str, Any]:
-    """The periodic pass: reconcile, scan the folder, then age out prescriptions.
+    """A poll and a sweep in one call. Kept for callers that want both.
 
-    FIT-11 for the reconcile, FIT-14 for the folder, FIT-12 for the missed check.
-    The order is not arbitrary — the missed check reads sessions, so it has to run
-    after both ingest paths have had their chance to produce one.
+    The running process does not use this — it runs the two on different clocks,
+    which is the whole point of separating them.
     """
-    moment = now or datetime.now(UTC)
+    return {**poll(conn, client, tz, write_note, lookback_days), **sweep(conn, tz, now)}
+
+
+def poll(
+    conn: psycopg.Connection,
+    client: clientmod.Intervals,
+    tz: ZoneInfo,
+    write_note: Callable[[dict[str, Any]], str] = no_review,
+    lookback_days: int = POLL_LOOKBACK_DAYS,
+) -> dict[str, Any]:
+    """Find new work and process it. The fast loop.
+
+    Without a webhook this is the primary ingest path rather than a backstop, so
+    it runs on the order of minutes. Two sources, both cheap:
+
+    FIT-11's reconcile costs exactly one API call to list the window, and only
+    pays for a file download when it finds something it has not seen. A window of
+    a couple of days is plenty when this runs every few minutes; the wide sweep
+    catches anything older that went missing.
+
+    FIT-14's watched folder costs nothing at all — no network, no credential. For
+    a Zwift ride synced from the local Activities directory this sees the file
+    before intervals.icu does, and it keeps working when intervals.icu does not.
+    """
     outcome = reconcilemod.run(
         conn, client, tz, oldest=date.today() - timedelta(days=lookback_days)
     )
-
     scanned = archivemod.scan(conn, watch_folder(), tz)
 
-    verdicts = reviewmod.missed(conn, moment, tz)
-    to_mark = [v["prescription_id"] for v in verdicts if v["missed"]]
-    marked = reviewmod.mark_missed(conn, to_mark)
-
-    # Reviews for anything the reconcile or the folder just created. The webhook
-    # path reviews inline; this covers the rides it never heard about.
+    # Reviews for anything either path just created. The webhook drain reviews
+    # inline; this covers the rides nothing told us about.
     reviews = []
     for session_id in _unreviewed(conn):
         body = reviewmod.review(conn, session_id, write_note)
@@ -262,9 +289,26 @@ def tick(
         "reconciled": outcome.created + outcome.updated,
         "errors": outcome.errors,
         "scanned": scanned,
-        "missed": marked,
         "reviewed": reviews,
     }
+
+
+def sweep(conn: psycopg.Connection, tz: ZoneInfo, now: datetime | None = None) -> dict[str, Any]:
+    """Age out prescriptions nothing satisfied. The slow loop.
+
+    Separated from the poll because FIT-12's grace window is 18 hours past the
+    local day end. Asking every two minutes whether an 18 hour deadline has passed
+    is eighteen hours of identical answers, and the check reads every open
+    prescription to produce them.
+
+    It has to run after the poll has had its chance to produce a session, which
+    is why the missed verdict cross checks the day's sessions rather than trusting
+    the absence of a match.
+    """
+    moment = now or datetime.now(UTC)
+    verdicts = reviewmod.missed(conn, moment, tz)
+    to_mark = [v["prescription_id"] for v in verdicts if v["missed"]]
+    return {"missed": reviewmod.mark_missed(conn, to_mark)}
 
 
 def _unreviewed(conn: psycopg.Connection) -> list[int]:

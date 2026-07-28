@@ -1,10 +1,19 @@
-"""The ingest process: an HTTP route, a queue worker, and a periodic tick.
+"""The ingest process: three loops and an HTTP route.
 
-FIT-01 needs the first and the last. The webhook is the trigger and the six
-hourly reconcile is the backstop for whatever it drops. The worker in between is
-what PERF-03 needs: intervals.icu retries any non-2xx with exponential backoff
-and treats a slow response as a failure, so the route may only acknowledge, and
-every download, parse and review happens after the response is on the wire.
+* `poller` — the primary ingest path. Asks intervals.icu what is new and scans
+  the watched folder, every `COACH_POLL_INTERVAL_S`. Without a registered app
+  there is no webhook, so nothing pushes a ride at us and PERF-03's budget is met
+  by asking often enough.
+* `sweeper` — ages out prescriptions nothing satisfied, every
+  `COACH_SWEEP_INTERVAL_S`. Separate because an 18 hour grace window has nothing
+  to say to a question asked every two minutes.
+* `worker` — drains the webhook queue. Idle unless a webhook is configured.
+* The route itself, which only ever acknowledges.
+
+That last point is not an optimisation. intervals.icu retries any non-2xx with
+exponential backoff and treats a slow response as a failure, so if the webhook is
+ever switched on, every download, parse and review has to happen after the
+response is already on the wire.
 
 The server is `http.server` from the standard library rather than a framework.
 This endpoint serves exactly one caller, behind a tunnel, on one route, and its
@@ -188,29 +197,71 @@ def worker(
             log.exception("drain failed; the queue keeps the work for the next pass")
 
 
-def ticker(
+def _loop(
+    name: str, stop: threading.Event, interval_s: int, body: Callable[[], dict[str, Any]]
+) -> None:
+    """Run `body` on a fixed cadence until `stop` is set.
+
+    The interval is measured from the start of each pass, so a slow pass shortens
+    the wait rather than adding to it and the cadence does not drift.
+
+    One failure must never end the loop. Without a webhook these loops are the
+    only thing that notices a new ride, so a loop that exits on a transient error
+    is the coach going quiet with nothing to say why.
+    """
+    while not stop.is_set():
+        started = time.monotonic()
+        try:
+            result = body()
+            if any(result.values()):
+                log.info("%s: %s", name, result)
+        except Exception:
+            log.exception("%s failed; retrying next interval", name)
+        stop.wait(max(1.0, interval_s - (time.monotonic() - started)))
+
+
+def poller(
     connect: Connect,
     client: clientmod.Intervals,
     tz: ZoneInfo,
     write_note: Callable[[dict[str, Any]], str],
     stop: threading.Event,
-    interval_s: int = reconcilemod.INTERVAL_HOURS * 3600,
+    interval_s: int | None = None,
 ) -> None:
-    """FIT-01's backstop loop. Runs until `stop` is set.
+    """The fast loop: find new activities and new files, and review them.
 
-    One tick failing must not end the loop; a reconcile that cannot reach
-    upstream should be retried in six hours, not abandoned until someone notices
-    the process is quiet.
+    This is the primary ingest path, not a backstop. With no registered app there
+    is no webhook, so nothing pushes a new ride at us and PERF-03's five minute
+    budget has to be met by asking often enough.
     """
-    while not stop.is_set():
-        started = time.monotonic()
-        try:
-            with connect() as conn:
-                result = service.tick(conn, client, tz, datetime.now(UTC), write_note)
-            log.info("tick: %s", result)
-        except Exception:
-            log.exception("tick failed; retrying next interval")
-        stop.wait(max(1.0, interval_s - (time.monotonic() - started)))
+    every = interval_s if interval_s is not None else reconcilemod.poll_interval_s()
+    log.info("polling every %ds", every)
+
+    def once() -> dict[str, Any]:
+        with connect() as conn:
+            return service.poll(conn, client, tz, write_note)
+
+    _loop("poll", stop, every, once)
+
+
+def sweeper(
+    connect: Connect,
+    tz: ZoneInfo,
+    stop: threading.Event,
+    interval_s: int | None = None,
+) -> None:
+    """The slow loop: age out prescriptions nothing satisfied (FIT-12).
+
+    Separate from the poll because an 18 hour grace window has nothing to say to
+    a question asked every two minutes.
+    """
+    every = interval_s if interval_s is not None else reconcilemod.sweep_interval_s()
+
+    def once() -> dict[str, Any]:
+        with connect() as conn:
+            return service.sweep(conn, tz, datetime.now(UTC))
+
+    _loop("sweep", stop, every, once)
 
 
 def main() -> None:
@@ -231,18 +282,22 @@ def main() -> None:
     write_note = service.no_review
 
     threads = [
+        # The webhook drain. Idle unless a webhook is actually configured, which
+        # it is not without a registered app; harmless and ready if that changes.
         threading.Thread(
             target=worker,
             args=(db.connect, client, tz, write_note, stop, nudge),
             daemon=True,
             name="drain",
         ),
+        # The primary ingest path while there is no webhook.
         threading.Thread(
-            target=ticker,
+            target=poller,
             args=(db.connect, client, tz, write_note, stop),
             daemon=True,
-            name="backstop",
+            name="poll",
         ),
+        threading.Thread(target=sweeper, args=(db.connect, tz, stop), daemon=True, name="sweep"),
     ]
     for thread in threads:
         thread.start()

@@ -8,6 +8,7 @@ the night).
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any
@@ -20,9 +21,50 @@ from coach.ingest import client as clientmod
 
 log = logging.getLogger(__name__)
 
-# FIT-01: the backstop interval. The webhook is the trigger; this catches what it
-# drops, which upstream says is rare but not impossible.
+# FIT-01 originally made this a six hourly backstop behind the webhook. Without a
+# registered app there is no webhook, so polling is the primary path for anything
+# that does not arrive through the watched folder, and the interval has to be
+# short enough to keep PERF-03's five minute budget.
+#
+# Both are environment tunable because the right value depends on the rate limit,
+# which is only knowable from the response headers on a live key. Changing the
+# cadence must not need a deploy.
+DEFAULT_POLL_INTERVAL_S = 120
+DEFAULT_SWEEP_INTERVAL_S = 6 * 3600
+
+# Kept for the sweep, which is still the six hourly job FIT-01 described.
 INTERVAL_HOURS = 6
+
+
+def _interval(name: str, default: int, floor: int) -> int:
+    """Read an interval from the environment, refusing values that would hurt.
+
+    A floor rather than a free number: polling every second would exhaust the
+    daily rate limit before lunch and the failure would look like intervals.icu
+    being broken rather than like a configuration mistake.
+    """
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warning("%s=%r is not a number; using %ds", name, raw, default)
+        return default
+    if value < floor:
+        log.warning("%s=%ds is below the %ds floor; using the floor", name, value, floor)
+        return floor
+    return value
+
+
+def poll_interval_s() -> int:
+    """COACH_POLL_INTERVAL_S. Floored at 30s to stay clear of the rate limit."""
+    return _interval("COACH_POLL_INTERVAL_S", DEFAULT_POLL_INTERVAL_S, 30)
+
+
+def sweep_interval_s() -> int:
+    """COACH_SWEEP_INTERVAL_S. Floored at 5 minutes; it has nothing to do faster."""
+    return _interval("COACH_SWEEP_INTERVAL_S", DEFAULT_SWEEP_INTERVAL_S, 300)
 
 
 @dataclass
