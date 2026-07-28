@@ -52,7 +52,7 @@ Roughly 30 minutes
 
 * Add the domain to Cloudflare if it is not already there.
 * Create a tunnel and install the connector as a container in the stack.
-* Route the hostname to the ingest service. Expose only two named routes: the MacroLog macro endpoint and the intervals.icu webhook. Nothing else, and never the database.
+* Route the hostname to the ingest service. Expose only the MacroLog macro endpoint for now. The intervals.icu webhook route exists but is unused while there is no registered app, so there is nothing to point at it yet. Nothing else, and never the database.
 * Verify from mobile data, not home wifi, or you will prove nothing.
 
 ### Step 3: Postgres
@@ -81,18 +81,39 @@ Roughly 5 minutes
 * The hard stop is separate and lives in the coach: OBS-07 halts model calls for the day at USD 3.00 and says so rather than going silent. Set it in `.env`, not in code.
 * The two are deliberately not proportional. Thirty days at the daily cap would be USD 90, above the monthly alert, because the daily figure is a runaway backstop rather than a budget slice. Any sustained overspend trips the monthly alert first, which is the ordering you want; the daily stop only catches a genuine loop. The nightly consolidation is the largest single cost and you want to see it move.
 
-### Step 6: intervals.icu API and webhook
+### Step 6: intervals.icu API
 
 Roughly 15 minutes
 
 * Copy your athlete id and API key from the intervals.icu settings page into .env. Key based auth, so no OAuth flow and no token refresh to maintain.
-* Register a webhook pointing at `https://coach.yourdomain/webhook/intervals` for activity uploads, and put the secret in .env as `INTERVALS_WEBHOOK_SECRET`. Subscribe to `ACTIVITY_UPLOADED` — the receiver records the other event types but acts only on that one, because `ACTIVITY_ANALYZED` is held 60 seconds upstream and would spend a fifth of the review budget before any work started.
-* There is no signature header to configure. intervals.icu authenticates the callback by putting the secret in the body, so the receiver compares it in constant time and records every delivery to make a replayed body harmless. If the variable is unset the endpoint refuses every payload rather than accepting anything.
-* Registering the webhook requires an app, which means one browser consent against your own account. The token does not expire and there is nothing to refresh, so no client code follows from it. Re-authorising later discards the previous token: if you redo the consent, update .env.
+* **No webhook is needed.** Webhooks require an app that only intervals.icu staff can create, and ingest does not depend on one. The API key alone covers every endpoint the coach uses. `INTERVALS_WEBHOOK_SECRET` can stay blank; the receiver is built and tested but idle, and switching it on later is a config change rather than a code change. See open item 11 for what that would take.
 * Confirm both connections are live on the platform side: Zwift feeding activities, Whoop feeding wellness.
-* **Do not reconnect Strava.** Activity webhooks are never delivered for Strava sourced activities. With Strava disconnected, everything arrives from Zwift and Wahoo directly and the webhook works. Reconnect it and webhook ingest silently stops for anything routed that way, with no error anywhere — rides would only appear on the six hourly reconcile, hours late, and the failure would look like the coach ignoring you rather than a broken integration. If Strava ever has to come back, the reconcile interval is the thing to shorten.
+* **Strava, if you ever reconnect it.** Activity webhooks are never delivered for Strava sourced activities. That mattered a great deal when the webhook was the ingest mechanism; it matters much less now, because the poll does not care where an activity came from and will pick a Strava sourced ride up on the next pass like any other. Reconnecting Strava is therefore no longer dangerous — but if you later switch the webhook on and reconnect Strava, ingest for anything routed that way would silently fall back to the poll with no error anywhere. Turn one on or the other, not both without thinking.
 * Check what the wellness payload actually contains for a recent day before assuming it covers everything, and record the answer against open item 3 in the PRD. If a metric is missing, it is dropped from the recovery deviation calculation per RECOV-02. Adding a direct Whoop integration is not an option: RECOV-03 forbids a Whoop client and SEC-04 forbids OAuth anywhere in the system.
 * Confirm the Zwift connection in intervals.icu settings is the two way integration, not just activity import. With it connected, planned workouts push to Zwift directly and no workout files ever need moving. Test it with one workout before the coach depends on it.
+
+### Step 6b: Sync Zwift's activity folder
+
+Roughly 15 minutes, and the highest value 15 minutes in this guide
+
+This is the fastest ingest path and the only one that survives intervals.icu being unavailable. Zwift already writes every ride to `Documents/Zwift/Activities` on the machine you ride on. Get those files to `COACH_FIT_WATCH` on the machine running the coach and rides ingest in seconds, with no API call, no credential and no webhook.
+
+* Syncthing is the straightforward option: share `Documents/Zwift/Activities` from the riding machine, receive it into `COACH_FIT_WATCH` on the server. Dropbox or any file sync works equally well. If the coach runs on the same machine you ride on, point `COACH_FIT_WATCH` straight at the Zwift folder and skip the sync entirely.
+* Make the receiving side read only if your sync tool offers it. Nothing in the coach deletes from that folder, and FIT-15 depends on the archive never being pruned, but a sync tool configured to mirror deletions could remove files upstream-deleted at the source. Receive only, never mirror.
+* Test it before trusting it: drop any `.fit` file into the folder and watch a session row appear within one poll interval. `uv run coach-ingest` logs each scan.
+
+Outdoor rides that sync straight from a head unit to intervals.icu will not appear here. Those come in on the poll below, which is why both paths exist.
+
+### Step 6c: Set the poll interval
+
+Roughly 2 minutes
+
+The poll is what covers every source the folder does not. Defaults are in `.env`:
+
+* `COACH_POLL_INTERVAL_S=120` — how often to ask intervals.icu for new activities. One API call per poll, and a file download only when it finds something new. 120s keeps PERF-03's five minute budget with room to spare.
+* `COACH_SWEEP_INTERVAL_S=21600` — the slow pass that ages out prescriptions nothing satisfied. Six hours; an 18 hour grace window has nothing to say to a question asked more often.
+
+Both are floored in code (30s and 300s) so a mistyped value cannot burn the daily rate limit. **Check the headroom once with a real key before leaving it unattended:** every response carries `X-RateLimit-Limit` and `X-RateLimit-Remaining` as `15m,daily` pairs. At 120s the poll makes about 720 calls a day. If that is close to the daily allowance, raise the interval — the folder path is unaffected either way, so Zwift rides stay fast regardless.
 
 ### Step 7: Calendar read access
 
@@ -159,6 +180,8 @@ COACH_TZ=Asia/Dubai
 COACH_INGEST_PORT=8080
 COACH_FIT_ARCHIVE=var/fit-archive
 COACH_FIT_WATCH=var/fit-inbox
+COACH_POLL_INTERVAL_S=120
+COACH_SWEEP_INTERVAL_S=21600
 ```
 
 The two folder paths are worth choosing deliberately. `COACH_FIT_ARCHIVE` is the permanent copy of every file the system has seen and is never pruned, which is the whole point of FIT-15 — disconnecting an upstream integration deletes that source's activities upstream, and this is what survives it. Put it on storage you back up. `COACH_FIT_WATCH` is a drop folder: anything ending in `.fit` that lands there is ingested on the next six hourly pass, with no upstream involved at all.
@@ -179,7 +202,7 @@ If the process is killed mid-ride, queued deliveries survive in the database and
 
 #### Daily, automatic
 
-* Activities arrive by webhook on upload; a session review follows within minutes.
+* Zwift rides arrive through the watched folder within seconds of the file syncing. Everything else arrives on the poll, by default within two minutes. A session review follows either way, inside the five minute budget.
 * MacroLog posts macros as you log meals and body mass to intervals.icu; wellness is read each morning and reconciled every six hours.
 * Calendar feeds fetch every six hours; planned sessions publish to intervals.icu on block change.
 * Consolidation runs at 03:00, then the recall suite and linter.

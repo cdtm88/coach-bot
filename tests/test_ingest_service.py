@@ -309,8 +309,12 @@ def test_the_tick_does_not_review_backfilled_history(
     assert calls == [], "a backfilled session was reviewed by the tick"
 
 
-def test_a_failing_tick_does_not_end_the_loop(conn: psycopg.Connection, sandbox: Path) -> None:
-    """FIT-01's backstop is worthless if one unreachable upstream stops it."""
+def test_a_failing_poll_does_not_end_the_loop(conn: psycopg.Connection, sandbox: Path) -> None:
+    """With no webhook the poll is the only thing that notices a ride.
+
+    A loop that exits on a transient upstream error is the coach going silent
+    with nothing anywhere saying why.
+    """
     attempts: list[int] = []
 
     class Broken(Upstream):
@@ -320,13 +324,12 @@ def test_a_failing_tick_does_not_end_the_loop(conn: psycopg.Connection, sandbox:
 
     stop = threading.Event()
     thread = threading.Thread(
-        target=server.ticker,
+        target=server.poller,
         args=(connector(conn), Broken([]), DUBAI, service.no_review, stop),
         kwargs={"interval_s": 1},
         daemon=True,
     )
     thread.start()
-    # Two ticks at a one second interval; the loop must survive the first.
     for _ in range(300):
         if len(attempts) >= 2:
             break
@@ -334,15 +337,49 @@ def test_a_failing_tick_does_not_end_the_loop(conn: psycopg.Connection, sandbox:
     stop.set()
     thread.join(timeout=5)
 
-    assert len(attempts) >= 2, "the loop stopped after a failing tick"
+    assert len(attempts) >= 2, "the loop stopped after a failing pass"
 
 
-def test_the_backstop_interval_is_six_hours() -> None:
-    """FIT-01 names the interval, so it is asserted rather than assumed."""
+def test_the_default_cadences(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two minutes to poll, six hours to sweep, unless the environment says otherwise."""
     from coach.ingest import reconcile
 
-    assert reconcile.INTERVAL_HOURS == 6
-    assert server.ticker.__defaults__[-1] == 6 * 3600
+    monkeypatch.delenv("COACH_POLL_INTERVAL_S", raising=False)
+    monkeypatch.delenv("COACH_SWEEP_INTERVAL_S", raising=False)
+    assert reconcile.poll_interval_s() == 120
+    assert reconcile.sweep_interval_s() == 6 * 3600
+
+
+def test_the_cadences_are_environment_tunable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The right interval depends on a rate limit only a live key can reveal."""
+    from coach.ingest import reconcile
+
+    monkeypatch.setenv("COACH_POLL_INTERVAL_S", "45")
+    monkeypatch.setenv("COACH_SWEEP_INTERVAL_S", "900")
+    assert reconcile.poll_interval_s() == 45
+    assert reconcile.sweep_interval_s() == 900
+
+
+def test_a_reckless_interval_is_floored_not_obeyed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Polling every second would burn the daily quota before lunch.
+
+    The failure would look like intervals.icu being broken rather than like a
+    configuration mistake, which is why this is a floor and not a free number.
+    """
+    from coach.ingest import reconcile
+
+    monkeypatch.setenv("COACH_POLL_INTERVAL_S", "1")
+    assert reconcile.poll_interval_s() == 30
+    monkeypatch.setenv("COACH_SWEEP_INTERVAL_S", "5")
+    assert reconcile.sweep_interval_s() == 300
+
+
+def test_a_nonsense_interval_falls_back_to_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A typo must not stop ingest; it warns and uses the default."""
+    from coach.ingest import reconcile
+
+    monkeypatch.setenv("COACH_POLL_INTERVAL_S", "two minutes please")
+    assert reconcile.poll_interval_s() == 120
 
 
 # --- FIT-12 through the service layer --------------------------------------
@@ -359,3 +396,65 @@ def test_a_ride_on_the_day_stops_the_tick_marking_it_missed(
     result = service.tick(conn, client, DUBAI, now=planned + timedelta(hours=30), lookback_days=60)
 
     assert result["missed"] == 0, "a prescription was missed on a day with a ride"
+
+
+# --- ingest without a webhook -----------------------------------------------
+
+
+def test_a_dropped_file_is_ingested_and_reviewed_with_no_api_call(
+    conn: psycopg.Connection, sandbox: Path
+) -> None:
+    """The path that needs no registered app, no webhook and no credential.
+
+    A Zwift ride synced from the local Activities directory lands here. This is
+    the primary ingest path for Zwift now, and the assertion that matters is the
+    call count: zero. It keeps working when intervals.icu is unreachable, and it
+    sees the file before intervals.icu does.
+    """
+    inbox = sandbox / "inbox"
+    inbox.mkdir()
+    (inbox / "zwift-ride.fit").write_bytes(ride_fit())
+
+    client = Upstream([])  # upstream has nothing and is never asked for anything
+    notes: list[str] = []
+    result = service.poll(conn, client, DUBAI, lambda _c: notes.append("n") or "Solid session.")
+    conn.commit()
+
+    assert len(result["scanned"]) == 1, "the dropped file was not ingested"
+    assert len(result["reviewed"]) == 1, "the dropped file produced no review"
+    assert notes == ["n"]
+    assert client.calls == ["activities"], (
+        f"the folder path should cost one list call at most, made {client.calls}"
+    )
+
+    with conn.cursor() as cur:
+        cur.execute("select source, avg_power_w, reviewed_at from sessions")
+        row = cur.fetchone()
+    assert row["source"] == "local_file"
+    assert float(row["avg_power_w"]) == 150.0
+    assert row["reviewed_at"] is not None
+
+
+def test_the_poll_asks_for_a_narrow_window(conn: psycopg.Connection, sandbox: Path) -> None:
+    """Running every couple of minutes, a fortnight of rows per pass buys nothing.
+
+    The wide window belongs to the backfill and to a manual reconcile, not to a
+    loop that runs seven hundred times a day.
+    """
+    windows: list[date] = []
+
+    class Watching(Upstream):
+        def activities(self, oldest: date, newest: date | None = None) -> list[dict[str, Any]]:
+            windows.append(oldest)
+            return []
+
+    service.poll(conn, Watching([]), DUBAI)
+    assert windows, "the poll made no list call"
+    span = (date.today() - windows[0]).days
+    assert span == service.POLL_LOOKBACK_DAYS == 2, f"asked for {span} days"
+
+
+def test_the_sweep_makes_no_upstream_call(conn: psycopg.Connection) -> None:
+    """It only reads prescriptions and sessions, so it costs nothing upstream."""
+    result = service.sweep(conn, DUBAI, datetime(2026, 7, 28, 12, 0, tzinfo=UTC))
+    assert result == {"missed": 0}
