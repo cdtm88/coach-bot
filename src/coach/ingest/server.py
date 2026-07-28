@@ -12,6 +12,9 @@
   mass (HLTH-04) and recovery (RECOV-01) arrive from. Hourly by default: the
   feed is written by a phone syncing overnight, so asking every two minutes
   would spend rate limit on an answer that changes once a day.
+* `calendar_poller` — reads the secret iCal feeds (CALR-01), six hourly per
+  CALR-02. Nothing to do with intervals.icu and no API key involved; it runs
+  here because this is the process that owns the inbound feeds.
 * The two routes, which only ever acknowledge.
 
 That last point is not an optimisation. intervals.icu retries any non-2xx with
@@ -47,6 +50,8 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 
+from coach.calendars import availability as calavailmod
+from coach.calendars import feed as calfeedmod
 from coach.health import macros as macromod
 from coach.health import wellness as wellnessmod
 from coach.ingest import client as clientmod
@@ -377,6 +382,36 @@ def _wellness_interval_s() -> int:
     )
 
 
+def calendar_poller(
+    connect: Connect,
+    tz: ZoneInfo,
+    stop: threading.Event,
+    interval_s: int | None = None,
+) -> None:
+    """Read the calendar feeds and derive observed availability (CALR-02, CALR-03).
+
+    Six hourly by default. Google publishes these on a cache, so asking more
+    often buys nothing — CALR-05 is written on the assumption that the lag is
+    survived rather than defeated.
+    """
+    every = interval_s if interval_s is not None else calfeedmod.interval_s()
+
+    def once() -> dict[str, Any]:
+        today = wellnessmod.local_today(tz)
+        with connect() as conn:
+            results = calfeedmod.sync(conn, tz, today)
+            # CALR-03: proposals, not writes. Consolidation ratifies them.
+            queued = calavailmod.observe(conn, today, tz)
+        return {
+            "feeds": len(results),
+            "events": sum(len(r.occurrences) for r in results),
+            "failed": [r.feed for r in results if not r.ok],
+            "availability_proposals": len(queued),
+        }
+
+    _loop("calendar", stop, every, once)
+
+
 def main() -> None:
     """Run the webhook route and the backstop loop together."""
     from coach import db
@@ -418,6 +453,13 @@ def main() -> None:
             args=(db.connect, client, tz, stop),
             daemon=True,
             name="wellness",
+        ),
+        # CALR-01 and CALR-02. No credential beyond the secret URLs themselves.
+        threading.Thread(
+            target=calendar_poller,
+            args=(db.connect, tz, stop),
+            daemon=True,
+            name="calendar",
         ),
     ]
     for thread in threads:

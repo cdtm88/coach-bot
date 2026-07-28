@@ -19,11 +19,17 @@
 | — | Handover doc and the three scripted live checks (PR #9) | merged |
 | P04 | Macros from MacroLog, body mass from wellness (HLTH-01 to HLTH-16) | built |
 | P05 | Recovery from wellness (RECOV-01 to RECOV-06) | built |
+| P06 | Calendar feeds (CALR-01 to CALR-06, PLAN-08) | built |
 
-366 tests, all against a real Postgres. Schema is at migration 008.
+405 tests, all against a real Postgres. Schema is at migration 009.
 
-**Next phase is P06**, the calendar feeds (CALR-01 to CALR-06). Nothing blocks
-it: it needs only secret iCal URLs in the environment, and it is the last of M2.
+**M2 is complete.** Next is **P07** — four week training blocks with cycling and
+gym prescriptions (BLOCK-01 to BLOCK-08, GYM-01 to GYM-08, SAFE-04), the first
+phase of M3 and the first that writes rather than reads.
+
+P06's soak gate needs the athlete to paste his secret iCal addresses into
+`CALENDAR_ICS_URLS`. Until then the loop runs and finds nothing, which is the
+same shape as the body mass pipeline: built, tested, waiting for its source.
 
 ## How ingest actually works now
 
@@ -98,6 +104,34 @@ is dropped rather than defaulted, which is how `hrvSDNN` needs no special
 handling at all. And a baseline with no variance produces no deviation rather
 than a division — worth knowing, because a fixture with identical values every
 day will silently test the refusal path instead of the one you meant.
+
+## How the calendar read works
+
+Three things about it are worth knowing before changing anything.
+
+**Recurrence is parsed, not approximated.** A weekly commitment arrives as one
+VEVENT with an RRULE, plus EXDATEs for the weeks it was cancelled and
+RECURRENCE-ID overrides for the weeks it moved. `icalendar` and
+`recurring-ical-events` do that expansion; a hand-rolled loop would miss the
+athlete's standing Tuesday, which is worse than having no calendar at all.
+
+**The window looks backwards as well as forwards.** CALR-02 says a rolling 21 day
+horizon and is written from the scheduler's point of view, but CALR-03 derives
+*observed* availability from busy blocks, and that is a claim about weeks that
+have already happened. So the fetch covers 28 days back as well, and the delete
+that propagates a cancellation is bounded by that window — an unbounded delete
+would take CALR-03's evidence with it every six hours.
+
+**The feed's identity is the URL fingerprint, not its name.** A failed fetch has
+no document to read `X-WR-CALNAME` from and falls back to a positional label; the
+next success names it "Work". Keyed on the name those are two feeds and the second
+collides. Keyed on the fingerprint it is one feed that has learned its name.
+
+CALR-06 is stricter here than it looks. The secret URL is never written to the
+database at all — a secret in a column is a secret in the nightly pg_dump — and
+`httpx` logs the request URL at INFO on every call, so a redacting filter is
+installed on that library's logger. Being careful in our own log lines would not
+have been enough.
 
 ## What the live checks found
 
@@ -236,6 +270,9 @@ docs/intervals-api.md    what the API actually does, verified, with dates
 docs/prd-review.md       the v2.1 review and what it changed
 scripts/verify_intervals.py   the three checks above
 scripts/dev-db.sh        throwaway Postgres for the suite
+
+src/coach/health/       P04 and P05: macros, body mass, recovery
+src/coach/calendars/    P06: the iCal feeds and observed availability
 ```
 
 On conflict: the design wins on schema and memory semantics, the PRD wins on

@@ -25,11 +25,11 @@ Fix the losing document in the same change (SPEC-02).
 
 ## Status
 
-**P00 to P05 are built.** The memory store and its invariants, the
-conversational agent, nightly consolidation, activity ingest with session
-reviews, macros from MacroLog with the body mass trend read from intervals.icu
-wellness, and recovery deviation computed against the athlete's own baseline.
-366 tests, all against a real Postgres.
+**P00 to P06 are built — M1 and M2 complete.** The memory store and its
+invariants, the conversational agent, nightly consolidation, activity ingest with
+session reviews, macros from MacroLog with the body mass trend read from
+intervals.icu wellness, recovery deviation computed against the athlete's own
+baseline, and the calendar feeds. 405 tests, all against a real Postgres.
 
 The live checks that gated P04 were run on 28 July 2026 and the headline is that
 **the wellness feed carries no weight at all.** Nothing feeds body mass until
@@ -38,8 +38,8 @@ this repository. So the trend pipeline is complete, tested and empty: every
 threshold is asserted on seeded data and the empty series is the first case in
 the suite, so the first real reading starts a trend with no code change.
 
-**P06 is next** — the calendar feeds, and the last phase of M2. It needs only
-secret iCal URLs in the environment.
+**P07 is next** — four week training blocks with cycling and gym prescriptions,
+the first phase of M3 and the first that writes rather than reads.
 
 Ingest needs no webhook. Zwift rides arrive through a watched folder with no API
 call at all; everything else arrives on a poll whose interval is configurable.
@@ -87,6 +87,9 @@ src/coach/
     recovery.py    the local deviation; the platform's score never an input
     trend.py       the weighted fit in SQL, and what it permits the coach to say
     breaks.py      is today inside a break; the rest of BREAK-* lands in P10
+  calendars/
+    feed.py        secret iCal feeds; the URL is never stored and never logged
+    availability.py  busy blocks to observed availability, through consolidation
 tests/             the acceptance criteria, as assertions
 ```
 
@@ -100,7 +103,7 @@ matters.
 ```bash
 uv sync --extra dev
 ./scripts/dev-db.sh start      # prints TEST_DATABASE_URL; export it
-uv run pytest -q               # 366 passing
+uv run pytest -q               # 405 passing
 ./scripts/dev-db.sh stop
 ```
 

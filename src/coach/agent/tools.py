@@ -16,6 +16,8 @@ from typing import Any
 
 import psycopg
 
+from coach import clock
+from coach.calendars import availability as calmod
 from coach.memory import facts as factmod
 from coach.memory import notes as notemod
 from coach.memory import state as statemod
@@ -25,7 +27,6 @@ DEFERRED = {
     "log_session": "P10",
     "get_sessions": "P03",
     "update_block": "P07",
-    "get_calendar": "P06",
     "write_session_events": "P08",
 }
 
@@ -141,7 +142,10 @@ SCHEMAS: list[dict[str, Any]] = [
     },
     {
         "name": "get_calendar",
-        "description": "Read busy time from the calendar feeds across a date range.",
+        "description": (
+            "Read busy time from the calendar feeds across a date range. The feeds "
+            "lag, so an empty result means nothing was published, not that he is free."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -252,5 +256,32 @@ def dispatch(conn: psycopg.Connection, name: str, arguments: dict[str, Any]) -> 
             origin="in_turn",
         )
         return {"queued": True, "pending_write_id": queued}
+
+    if name == "get_calendar":
+        # CALR-05: what the feed published, labelled as such. The tool result
+        # counts against the MEM-11 budget in the same turn, so it returns the
+        # blocks and not the whole calendar.
+        blocks = calmod.busy_between(
+            conn,
+            date.fromisoformat(arguments["since"]),
+            date.fromisoformat(arguments["until"]),
+            clock.configured_tz(),
+        )
+        return {
+            "busy": [
+                {
+                    "local_date": _serialise(b.local_date),
+                    "starts_at": _serialise(b.starts_at),
+                    "ends_at": _serialise(b.ends_at),
+                    "summary": b.summary,
+                    "all_day": b.all_day,
+                }
+                for b in blocks[:50]
+            ],
+            "caveat": (
+                "Google publishes these feeds on a cache. This is what it showed, not "
+                "a guarantee that he is free at any other time."
+            ),
+        }
 
     raise UnknownTool(name)  # pragma: no cover - unreachable given TOOL_NAMES

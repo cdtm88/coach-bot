@@ -121,7 +121,9 @@ Roughly 10 minutes
 
 * No Google Cloud project, no consent screen, no OAuth. In Google Calendar settings, open each calendar you want the coach to see and copy the secret address in iCal format.
 * Include anything that shapes your week: work, personal, golf, travel.
-* Paste the URLs into .env as a comma separated list. Treat them as passwords, because anyone holding one can read that calendar.
+* Paste the URLs into `CALENDAR_ICS_URLS` in .env as a comma separated list. Treat them as passwords, because anyone holding one can read that calendar. The coach never writes them to the database and never logs them — including through `httpx`, which logs the request URL on every call and has a redacting filter installed on it for exactly that reason.
+* The coach reads them every six hours (`COACH_CALENDAR_INTERVAL_S`), covering four weeks back and three forward. Backwards because observed availability is a claim about weeks that have happened; forwards because that is what scheduling needs.
+* Mark anything you want the coach to ignore as "free" rather than deleting it. A birthday reminder marked busy costs you an evening a week.
 * Note the trade: Google publishes these feeds on a cache, so a commitment added an hour ago may not appear immediately. Acceptable here because the coach only reads them and the weekly review confirms the week ahead, which is what CALR-05 encodes. Swapping to OAuth is not the escape hatch if the lag bites — SEC-04 forbids OAuth anywhere in the system, and PLAN-04 is scoped to what the feed showed at scheduling time precisely so the lag is survivable.
 
 ### Step 8: MacroLog wiring
