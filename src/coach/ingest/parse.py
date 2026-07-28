@@ -11,6 +11,7 @@ at all. Everything in :class:`Parsed` is arithmetic over samples this module rea
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import io
 import logging
@@ -18,6 +19,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 log = logging.getLogger(__name__)
+
+# gzip's magic number. intervals.icu serves original activity files compressed —
+# the cookbook's own example writes the response to `activity.fit.gz`.
+GZIP_MAGIC = b"\x1f\x8b"
 
 # Normalised power is a 30 second rolling average raised to the fourth power,
 # averaged, then the fourth root. Below this many samples the rolling window is
@@ -114,9 +119,33 @@ def _summarise(
     return parsed
 
 
+def decompressed(data: bytes) -> bytes:
+    """Gunzip if the bytes are gzipped, otherwise return them unchanged.
+
+    Sniffing the magic number rather than branching on which endpoint produced
+    the bytes is deliberate. httpx strips `Content-Encoding: gzip` transparently
+    but leaves a gzipped *payload* alone, and the two are indistinguishable to
+    the caller, so a rule based on the endpoint would be right only by luck.
+    Sniffing is correct under both.
+
+    Idempotent, so it is safe to call at every boundary rather than exactly one.
+    """
+    if not data.startswith(GZIP_MAGIC):
+        return data
+    try:
+        return gzip.decompress(data)
+    except OSError as exc:
+        # Starts with the magic number but will not inflate. Treat as opaque
+        # rather than guessing; the caller's parse will fail with a clearer error.
+        log.warning("bytes look gzipped but did not inflate: %s", exc)
+        return data
+
+
 def from_fit(data: bytes) -> Parsed:
     """Parse a FIT file. FIT-03 and FIT-14 both arrive here."""
     import fitdecode
+
+    data = decompressed(data)
 
     power: list[float] = []
     hr: list[float] = []
@@ -226,5 +255,12 @@ def from_streams(streams: list[dict], started_at: datetime | None = None) -> Par
 
 
 def content_hash(data: bytes) -> str:
-    """FIT-04: the content half of deduplication."""
-    return hashlib.sha256(data).hexdigest()
+    """FIT-04: the content half of deduplication.
+
+    Hashed after decompression, which is what makes the two ingest paths agree.
+    The webhook downloads a gzipped original and the watched folder gets a plain
+    FIT; hashing the bytes as received would give one ride two hashes and
+    therefore two session rows, which is precisely the duplicate FIT-04 exists to
+    prevent.
+    """
+    return hashlib.sha256(decompressed(data)).hexdigest()

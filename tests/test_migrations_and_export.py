@@ -172,12 +172,58 @@ def test_no_credentials_in_the_repository() -> None:
     assert not suspicious, f"possible credentials: {suspicious}"
 
 
+# The one permitted occurrence of the banned substring, and why.
+#
+# `oauth_client_id` is a field name on the intervals.icu CALENDAR_UPDATED
+# payload. PLAN-06 has to tell the athlete's calendar edits from the coach's own
+# writes echoing back, and that field is how upstream labels the difference.
+# Reading a key out of a JSON body is not a token exchange, so banning it would
+# be the scan enforcing its own vocabulary rather than SEC-04.
+#
+# The exemption is exactly this token. Anything else containing the substring
+# still fails, and the two markers that actually describe a token exchange have
+# no exemption at all.
+ALLOWED_OAUTH_TOKEN = "oauth_client_id"
+
+# Bounded on both sides. A plain string replace would also blank the prefix of
+# `oauth_client_identifier`, leaving a fragment with no marker in it, and the
+# exemption would be defeatable by anyone who appended a character.
+_EXEMPT = re.compile(rf"\b{ALLOWED_OAUTH_TOKEN}\b")
+
+
+def _scannable(text: str) -> str:
+    return _EXEMPT.sub("", text.lower())
+
+
 def test_no_oauth_anywhere(conn: psycopg.Connection) -> None:
     """SEC-04: the codebase contains no OAuth client or token refresh logic."""
     offenders = []
     for path in (REPO / "src").rglob("*.py"):
-        text = path.read_text().lower()
+        scannable = _scannable(path.read_text())
         for marker in ("oauth", "refresh_token", "authorization_code"):
-            if marker in text:
+            if marker in scannable:
                 offenders.append(f"{path.relative_to(REPO)}: {marker}")
     assert not offenders, offenders
+
+
+def test_the_oauth_exemption_does_not_let_a_real_client_through() -> None:
+    """The narrow exemption above must not become a general one.
+
+    Without this, someone could satisfy the scan by naming a variable
+    `oauth_client_id_handler` and the guard would be silently defeated.
+    """
+    for hostile in (
+        "oauth_client = OAuth2Session()",
+        "token = refresh_token(...)",
+        "grant_type = 'authorization_code'",
+        "oauth_client_identifier = 1",  # not the exempt token, must still fail
+        "myoauth_client_id = 1",  # nor is this
+    ):
+        assert any(
+            m in _scannable(hostile) for m in ("oauth", "refresh_token", "authorization_code")
+        ), f"the scan would have missed: {hostile}"
+
+
+def test_the_permitted_field_name_really_is_permitted() -> None:
+    """The other direction: the exemption has to actually exempt something."""
+    assert "oauth" not in _scannable("calendar.oauth_client_id")

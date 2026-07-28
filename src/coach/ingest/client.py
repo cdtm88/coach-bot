@@ -24,7 +24,14 @@ from typing import Any
 
 import httpx
 
+from coach.ingest import parse
+
 log = logging.getLogger(__name__)
+
+# The activity list has an undocumented server side default. Asking for a number
+# means a wide backfill window truncates visibly or not at all, rather than
+# silently returning whatever the default happens to be that week.
+ACTIVITY_PAGE_LIMIT = 500
 
 BASE = "https://intervals.icu/api/v1"
 USERNAME = "API_KEY"
@@ -102,17 +109,35 @@ class Intervals:
 
     # --- reads ---------------------------------------------------------
 
-    def activities(self, oldest: date, newest: date | None = None) -> list[dict[str, Any]]:
+    def activities(
+        self, oldest: date, newest: date | None = None, limit: int = ACTIVITY_PAGE_LIMIT
+    ) -> list[dict[str, Any]]:
         """FIT-05 backfill and FIT-11 reconcile both read this.
 
         `oldest` is required upstream: omitting it returns 422 with a named error
         rather than defaulting to everything.
+
+        `limit` is sent explicitly. Left off, the window is capped by a server
+        default that is not in the spec, so a backfill chunk could come back
+        truncated with no error and the missing rides would look like rides that
+        never happened. A full page is a signal the window was too wide, which is
+        why the caller checks for it.
         """
-        return self._get(
+        rows = self._get(
             f"/athlete/{self.athlete_id}/activities",
             oldest=oldest.isoformat(),
             newest=newest.isoformat() if newest else None,
+            limit=limit,
         ).json()
+        if len(rows) >= limit:
+            log.warning(
+                "activity list for %s..%s returned a full page of %d; the window may be "
+                "truncated. Narrow the chunk.",
+                oldest,
+                newest,
+                limit,
+            )
+        return rows
 
     def activity(self, activity_id: str) -> dict[str, Any]:
         return self._get(f"/activity/{activity_id}").json()
@@ -123,9 +148,13 @@ class Intervals:
         Returns None when there is no original to fetch, which upstream documents
         for Strava activities and which is also true of anything created manually.
         The caller falls back to streams rather than to a derived aggregate.
+
+        The response is served gzipped. Decompressed here so that everything
+        downstream — the parser, the content hash, the archive — sees the same
+        plain FIT bytes the watched folder produces.
         """
         try:
-            return self._get(f"/activity/{activity_id}/file").content
+            return parse.decompressed(self._get(f"/activity/{activity_id}/file").content)
         except IntervalsError as exc:
             log.info("no original file for %s: %s", activity_id, exc)
             return None
@@ -145,10 +174,18 @@ class Intervals:
 
     # --- writes --------------------------------------------------------
 
-    def upload_file(self, data: bytes, filename: str) -> dict[str, Any]:
-        """FIT-16: replay a locally archived file back upstream."""
+    def upload_file(
+        self, data: bytes, filename: str, external_id: str | None = None
+    ) -> dict[str, Any]:
+        """FIT-16: replay a locally archived file back upstream.
+
+        `external_id` is sent so the restored activity is recognisable when it
+        comes back through ingest. Without it a FIT-16 restore looks like a brand
+        new ride, and FIT-17's matching has nothing to key on.
+        """
         response = self._client.post(
             f"/athlete/{self.athlete_id}/activities",
+            params={"external_id": external_id} if external_id else None,
             files={"file": (filename, data, "application/octet-stream")},
         )
         self.last_limit = RateLimit.from_headers(response.headers)

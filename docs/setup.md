@@ -90,6 +90,7 @@ Roughly 15 minutes
 * There is no signature header to configure. intervals.icu authenticates the callback by putting the secret in the body, so the receiver compares it in constant time and records every delivery to make a replayed body harmless. If the variable is unset the endpoint refuses every payload rather than accepting anything.
 * Registering the webhook requires an app, which means one browser consent against your own account. The token does not expire and there is nothing to refresh, so no client code follows from it. Re-authorising later discards the previous token: if you redo the consent, update .env.
 * Confirm both connections are live on the platform side: Zwift feeding activities, Whoop feeding wellness.
+* **Do not reconnect Strava.** Activity webhooks are never delivered for Strava sourced activities. With Strava disconnected, everything arrives from Zwift and Wahoo directly and the webhook works. Reconnect it and webhook ingest silently stops for anything routed that way, with no error anywhere — rides would only appear on the six hourly reconcile, hours late, and the failure would look like the coach ignoring you rather than a broken integration. If Strava ever has to come back, the reconcile interval is the thing to shorten.
 * Check what the wellness payload actually contains for a recent day before assuming it covers everything, and record the answer against open item 3 in the PRD. If a metric is missing, it is dropped from the recovery deviation calculation per RECOV-02. Adding a direct Whoop integration is not an option: RECOV-03 forbids a Whoop client and SEC-04 forbids OAuth anywhere in the system.
 * Confirm the Zwift connection in intervals.icu settings is the two way integration, not just activity import. With it connected, planned workouts push to Zwift directly and no workout files ever need moving. Test it with one workout before the coach depends on it.
 
@@ -168,7 +169,13 @@ Never commit this file. Rotate the Anthropic key and the ingest secret if it is 
 
 #### Processes
 
-`coach-ingest` runs the activity side: it serves the webhook route on `COACH_INGEST_PORT` and runs the reconcile, folder scan and missed-session check every six hours in the same process. It binds to loopback only — the tunnel is what makes it reachable, so there is no reason for it to listen anywhere else. `GET /health` answers without a secret if you want something for the tunnel to probe.
+`coach-ingest` runs the activity side, as three things in one process:
+
+* The webhook route on `COACH_INGEST_PORT`, bound to loopback — the tunnel is what makes it reachable, so there is no reason for it to listen anywhere else. `GET /health` answers without a secret if you want something for the tunnel to probe.
+* A worker that does the actual downloading, parsing and reviewing. The route only queues; intervals.icu retries any non-2xx with exponential backoff and treats a slow response as a failure, so the response has to be immediate and the work has to happen after it. A delivery that fails is retried on the next pass rather than lost.
+* The six hourly pass: reconcile, watched folder scan, missed session check.
+
+If the process is killed mid-ride, queued deliveries survive in the database and are picked up on restart. Nothing is held in memory that matters.
 
 #### Daily, automatic
 

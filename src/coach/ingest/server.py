@@ -1,7 +1,10 @@
-"""The ingest process: an HTTP route for the webhook and a periodic tick.
+"""The ingest process: an HTTP route, a queue worker, and a periodic tick.
 
-FIT-01 needs both. The webhook is the trigger, and the six hourly reconcile is
-the backstop for whatever it drops.
+FIT-01 needs the first and the last. The webhook is the trigger and the six
+hourly reconcile is the backstop for whatever it drops. The worker in between is
+what PERF-03 needs: intervals.icu retries any non-2xx with exponential backoff
+and treats a slow response as a failure, so the route may only acknowledge, and
+every download, parse and review happens after the response is on the wire.
 
 The server is `http.server` from the standard library rather than a framework.
 This endpoint serves exactly one caller, behind a tunnel, on one route, and its
@@ -11,8 +14,8 @@ without adding anything this has to do.
 
 SEC-02 lives one layer down: nothing here decides whether a payload is genuine,
 because the check belongs with the replay record it is paired with. The handler
-cannot accidentally skip it — there is no path from a request to ingest that does
-not go through :func:`coach.ingest.service.on_webhook`.
+cannot accidentally skip it — there is no path from a request into the queue that
+does not go through :func:`coach.ingest.service.receive`.
 """
 
 from __future__ import annotations
@@ -51,15 +54,18 @@ MAX_BODY_BYTES = 1 << 20
 
 
 def make_handler(
-    connect: Connect,
-    client: clientmod.Intervals,
-    tz: ZoneInfo,
-    write_note: Callable[[dict[str, Any]], str],
+    connect: Connect, wake: Callable[[], None] = lambda: None
 ) -> type[BaseHTTPRequestHandler]:
     """Build the request handler bound to its dependencies.
 
-    A factory rather than class attributes so a test can drive a real request
-    against a real socket with a fake upstream.
+    Note what it does *not* take: no API client, no timezone, no note writer. The
+    handler cannot reach upstream or call a model even by accident, because it
+    holds nothing capable of it. That is PERF-03 enforced structurally rather
+    than by remembering to keep the route thin.
+
+    `wake` nudges the worker so a queued delivery is picked up immediately rather
+    than on the next scheduled pass. Latency comes from that nudge; correctness
+    does not depend on it.
     """
 
     class Handler(BaseHTTPRequestHandler):
@@ -110,7 +116,7 @@ def make_handler(
 
             try:
                 with connect() as conn:
-                    handled = service.on_webhook(conn, client, payload, tz, write_note)
+                    queued = service.receive(conn, payload)
             except webhookmod.Rejected as exc:
                 # SEC-02. Deliberately uninformative: a caller that failed the
                 # secret check learns only that it failed.
@@ -118,19 +124,17 @@ def make_handler(
                 self._reply(401, {"error": "rejected"})
                 return
             except Exception:
-                # A 500 makes intervals.icu retry, and the replay record makes
-                # that retry safe, so failing loudly here is the right move.
-                log.exception("webhook handling failed")
+                # A 500 makes intervals.icu retry with backoff. Safe, because
+                # nothing was queued: the enqueue is the only write on this path.
+                log.exception("webhook enqueue failed")
                 self._reply(500, {"error": "internal error"})
                 return
 
-            self._reply(
-                200,
-                {
-                    "handled": len(handled),
-                    "sessions": [h.session_id for h in handled if h.session_id],
-                },
-            )
+            # PERF-03: answered without a network call or a model call having
+            # happened. Everything downloaded, parsed and reviewed is the
+            # drain's job, and it runs after this response is on the wire.
+            self._reply(200, {"queued": queued})
+            wake()
 
         def do_GET(self) -> None:  # noqa: N802 - the stdlib's naming, not ours
             if self.path.rstrip("/") == "/health":
@@ -143,9 +147,7 @@ def make_handler(
 
 def serve(
     connect: Connect,
-    client: clientmod.Intervals,
-    tz: ZoneInfo,
-    write_note: Callable[[dict[str, Any]], str],
+    wake: Callable[[], None] = lambda: None,
     host: str = "127.0.0.1",
     port: int = 8080,
 ) -> ThreadingHTTPServer:
@@ -154,7 +156,36 @@ def serve(
     Bound to loopback by default: the tunnel is what makes it reachable, so
     binding to every interface would only widen the exposure.
     """
-    return ThreadingHTTPServer((host, port), make_handler(connect, client, tz, write_note))
+    return ThreadingHTTPServer((host, port), make_handler(connect, wake))
+
+
+def worker(
+    connect: Connect,
+    client: clientmod.Intervals,
+    tz: ZoneInfo,
+    write_note: Callable[[dict[str, Any]], str],
+    stop: threading.Event,
+    nudge: threading.Event,
+    idle_s: float = 30.0,
+) -> None:
+    """Drain the delivery queue. The half of ingest that is allowed to be slow.
+
+    Woken by the HTTP handler so a ride is processed seconds after it lands, and
+    otherwise polling on `idle_s` so a delivery queued while this was busy is
+    still picked up without a second nudge.
+    """
+    while not stop.is_set():
+        nudge.wait(idle_s)
+        nudge.clear()
+        if stop.is_set():
+            break
+        try:
+            with connect() as conn:
+                handled = service.drain(conn, client, tz, write_note)
+            if handled:
+                log.info("drained %d deliveries", len(handled))
+        except Exception:
+            log.exception("drain failed; the queue keeps the work for the next pass")
 
 
 def ticker(
@@ -192,18 +223,31 @@ def main() -> None:
 
     client = clientmod.Intervals()
     stop = threading.Event()
+    nudge = threading.Event()
 
     # No review writer wired yet: the note generation call belongs to the agent
     # and is threaded through when the two processes are joined. Until then this
     # ingests and matches without spending a model call.
     write_note = service.no_review
 
-    thread = threading.Thread(
-        target=ticker, args=(db.connect, client, tz, write_note, stop), daemon=True
-    )
-    thread.start()
+    threads = [
+        threading.Thread(
+            target=worker,
+            args=(db.connect, client, tz, write_note, stop, nudge),
+            daemon=True,
+            name="drain",
+        ),
+        threading.Thread(
+            target=ticker,
+            args=(db.connect, client, tz, write_note, stop),
+            daemon=True,
+            name="backstop",
+        ),
+    ]
+    for thread in threads:
+        thread.start()
 
-    httpd = serve(db.connect, client, tz, write_note, port=port)
+    httpd = serve(db.connect, nudge.set, port=port)
     log.info("ingest listening on %s%s", port, ROUTE)
     try:
         httpd.serve_forever()
@@ -211,5 +255,6 @@ def main() -> None:
         pass
     finally:
         stop.set()
+        nudge.set()  # release the worker from its wait so it sees the stop
         httpd.server_close()
         client.close()

@@ -29,6 +29,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 from coach.ingest import server, service  # noqa: E402
 from conftest_fit import build_fit  # noqa: E402
+from ingest_harness import Upstream, connector, post  # noqa: E402
 from test_ingest import (  # noqa: E402
     DUBAI,
     SECRET,
@@ -40,98 +41,6 @@ from test_ingest import (  # noqa: E402
     uploaded,
 )
 
-
-class Upstream:
-    """A fake intervals.icu that counts what was asked of it.
-
-    The counts are the point: PERF-03 is a latency requirement, and the only
-    thing this system controls about its latency is how many times it goes to the
-    network per activity.
-    """
-
-    def __init__(self, activities_: list[dict[str, Any]], files: dict[str, bytes] | None = None):
-        self.upstream = activities_
-        self.files = files or {}
-        self.last_limit = type("L", (), {"exhausted": False})()
-        self.calls: list[str] = []
-
-    def _record(self, name: str) -> None:
-        self.calls.append(name)
-
-    def activities(self, oldest: date, newest: date | None = None) -> list[dict[str, Any]]:
-        self._record("activities")
-        return self.upstream
-
-    def activity(self, activity_id: str) -> dict[str, Any]:
-        self._record("activity")
-        for candidate in self.upstream:
-            if candidate["id"] == activity_id:
-                return candidate
-        raise KeyError(activity_id)
-
-    def original_file(self, activity_id: str) -> bytes | None:
-        self._record("original_file")
-        return self.files.get(activity_id)
-
-    def streams(self, activity_id: str) -> list[dict[str, Any]]:
-        self._record("streams")
-        return []
-
-
-@pytest.fixture
-def sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Keep the archive and watch folders inside the test's own directory."""
-    monkeypatch.setenv("COACH_FIT_ARCHIVE", str(tmp_path / "archive"))
-    monkeypatch.setenv("COACH_FIT_WATCH", str(tmp_path / "inbox"))
-    return tmp_path
-
-
-def connector(conn: psycopg.Connection):
-    """Hand the handler the test's own connection, without closing it.
-
-    The handler runs on another thread, so it cannot open its own connection to
-    the test database and still see the test's uncommitted fixture rows.
-    """
-    from contextlib import contextmanager
-
-    @contextmanager
-    def connect():
-        yield conn
-
-    return connect
-
-
-@pytest.fixture
-def endpoint(conn: psycopg.Connection, sandbox: Path):
-    """A real HTTP server on a real port, torn down after the test."""
-    started: dict[str, Any] = {}
-
-    def build(client: Upstream, write_note=service.no_review):
-        httpd = server.serve(connector(conn), client, DUBAI, write_note, port=0)
-        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-        thread.start()
-        started["httpd"] = httpd
-        return f"http://127.0.0.1:{httpd.server_address[1]}"
-
-    yield build
-
-    if "httpd" in started:
-        started["httpd"].shutdown()
-        started["httpd"].server_close()
-
-
-def post(url: str, body: Any, raw: bytes | None = None) -> tuple[int, dict[str, Any]]:
-    data = raw if raw is not None else json.dumps(body).encode()
-    request = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}, method="POST"
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            return response.status, json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read() or b"{}")
-
-
 # --- FIT-01 / SEC-02 at the endpoint ---------------------------------------
 
 
@@ -141,12 +50,12 @@ def test_an_upload_webhook_produces_a_reviewed_session(
     """FIT-01 end to end: a POST to the route leaves a session and a review."""
     monkeypatch.setenv("INTERVALS_WEBHOOK_SECRET", SECRET)
     client = Upstream([activity()], {"i1001": ride_fit()})
-    url = endpoint(client, lambda _context: "Solid tempo. Hold that cadence next time.")
+    ep = endpoint(client, lambda _context: "Solid tempo. Hold that cadence next time.")
 
-    status, body = post(f"{url}{server.ROUTE}", payload(uploaded()))
+    status, body, handled = ep.post_and_drain(payload(uploaded()))
     assert status == 200
-    assert body["handled"] == 1
-    assert body["sessions"], "the webhook produced no session"
+    assert body == {"queued": 1}, "the route did more than acknowledge"
+    assert [h.session_id for h in handled if h.session_id], "the drain produced no session"
 
     with conn.cursor() as cur:
         cur.execute("select external_ref, reviewed_at, avg_power_w from sessions")
@@ -162,9 +71,9 @@ def test_the_endpoint_rejects_a_wrong_secret(
 ) -> None:
     """SEC-02 at the boundary, not one layer in."""
     monkeypatch.setenv("INTERVALS_WEBHOOK_SECRET", SECRET)
-    url = endpoint(Upstream([activity()], {"i1001": ride_fit()}))
+    ep = endpoint(Upstream([activity()], {"i1001": ride_fit()}))
 
-    status, _ = post(f"{url}{server.ROUTE}", payload(uploaded(), secret="wrong"))
+    status, _, _ = ep.post_and_drain(payload(uploaded(), secret="wrong"))
     assert status == 401
 
     with conn.cursor() as cur:
@@ -177,8 +86,8 @@ def test_the_rejection_says_nothing_useful(
 ) -> None:
     """A caller that failed the check learns only that it failed."""
     monkeypatch.setenv("INTERVALS_WEBHOOK_SECRET", SECRET)
-    url = endpoint(Upstream([]))
-    _, body = post(f"{url}{server.ROUTE}", payload(uploaded(), secret="wrong"))
+    ep = endpoint(Upstream([]))
+    _, body = ep.post(payload(uploaded(), secret="wrong"))
     assert body == {"error": "rejected"}
     assert "secret" not in json.dumps(body).lower()
 
@@ -189,12 +98,13 @@ def test_a_redelivered_webhook_over_http_creates_no_second_session(
     """FIT-02: the retry intervals.icu makes on a slow response is safe."""
     monkeypatch.setenv("INTERVALS_WEBHOOK_SECRET", SECRET)
     client = Upstream([activity()], {"i1001": ride_fit()})
-    url = endpoint(client)
+    ep = endpoint(client)
 
-    first = post(f"{url}{server.ROUTE}", payload(uploaded()))
-    second = post(f"{url}{server.ROUTE}", payload(uploaded()))
+    first = ep.post_and_drain(payload(uploaded()))
+    second = ep.post_and_drain(payload(uploaded()))
     assert first[0] == 200 and second[0] == 200
-    assert second[1]["handled"] == 0, "the replay was acted on"
+    assert second[1] == {"queued": 0}, "the replay was queued"
+    assert second[2] == [], "the replay was acted on"
 
     with conn.cursor() as cur:
         cur.execute("select count(*) as n from sessions")
@@ -207,12 +117,11 @@ def test_a_non_trigger_event_is_recorded_but_not_ingested(
     """FIT-01: ACTIVITY_ANALYZED is known, logged, and not the trigger."""
     monkeypatch.setenv("INTERVALS_WEBHOOK_SECRET", SECRET)
     client = Upstream([activity()], {"i1001": ride_fit()})
-    url = endpoint(client)
+    ep = endpoint(client)
 
     analyzed = dict(uploaded(), type="ACTIVITY_ANALYZED")
-    status, _ = post(f"{url}{server.ROUTE}", payload(analyzed))
+    status, _, _ = ep.post_and_drain(payload(analyzed))
     assert status == 200
-    assert client.calls == [], "a non-trigger event went upstream"
 
     with conn.cursor() as cur:
         cur.execute("select count(*) as n from sessions")
@@ -223,18 +132,18 @@ def test_a_non_trigger_event_is_recorded_but_not_ingested(
 
 def test_an_unknown_route_is_not_the_webhook(endpoint, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("INTERVALS_WEBHOOK_SECRET", SECRET)
-    url = endpoint(Upstream([]))
-    assert post(f"{url}/", payload(uploaded()))[0] == 404
-    assert post(f"{url}/webhook", payload(uploaded()))[0] == 404
+    ep = endpoint(Upstream([]))
+    assert post(f"{ep.url}/", payload(uploaded()))[0] == 404
+    assert post(f"{ep.url}/webhook", payload(uploaded()))[0] == 404
 
 
 def test_a_body_that_is_not_json_is_a_400_not_a_crash(
     endpoint, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("INTERVALS_WEBHOOK_SECRET", SECRET)
-    url = endpoint(Upstream([]))
-    assert post(f"{url}{server.ROUTE}", None, raw=b"not json at all")[0] == 400
-    assert post(f"{url}{server.ROUTE}", None, raw=b'["a list"]')[0] == 400
+    ep = endpoint(Upstream([]))
+    assert post(f"{ep.url}{server.ROUTE}", None, raw=b"not json at all")[0] == 400
+    assert post(f"{ep.url}{server.ROUTE}", None, raw=b'["a list"]')[0] == 400
 
 
 def test_an_oversized_body_is_refused_before_it_is_read(
@@ -250,8 +159,8 @@ def test_an_oversized_body_is_refused_before_it_is_read(
     import socket
 
     monkeypatch.setenv("INTERVALS_WEBHOOK_SECRET", SECRET)
-    url = endpoint(Upstream([]))
-    host, port = url.removeprefix("http://").split(":")
+    ep = endpoint(Upstream([]))
+    host, port = ep.url.removeprefix("http://").split(":")
 
     with socket.create_connection((host, int(port)), timeout=10) as sock:
         sock.sendall(
@@ -268,14 +177,14 @@ def test_an_oversized_body_is_refused_before_it_is_read(
 
 def test_an_absent_body_is_refused_too(endpoint, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("INTERVALS_WEBHOOK_SECRET", SECRET)
-    url = endpoint(Upstream([]))
-    assert post(f"{url}{server.ROUTE}", None, raw=b"")[0] == 413
+    ep = endpoint(Upstream([]))
+    assert post(f"{ep.url}{server.ROUTE}", None, raw=b"")[0] == 413
 
 
 def test_health_answers_without_a_secret(endpoint, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("INTERVALS_WEBHOOK_SECRET", SECRET)
-    url = endpoint(Upstream([]))
-    with urllib.request.urlopen(f"{url}/health", timeout=10) as response:
+    ep = endpoint(Upstream([]))
+    with urllib.request.urlopen(f"{ep.url}/health", timeout=10) as response:
         assert response.status == 200
 
 
@@ -294,7 +203,8 @@ def test_the_hot_path_makes_two_upstream_calls(
     monkeypatch.setenv("INTERVALS_WEBHOOK_SECRET", SECRET)
     client = Upstream([activity()], {"i1001": ride_fit()})
 
-    handled = service.on_webhook(conn, client, payload(uploaded()), DUBAI)
+    service.receive(conn, payload(uploaded()))
+    handled = service.drain(conn, client, DUBAI)
 
     assert len(handled) == 1
     assert client.calls == ["activity", "original_file"], client.calls
@@ -307,7 +217,8 @@ def test_a_missing_original_file_costs_one_extra_call_and_no_more(
     monkeypatch.setenv("INTERVALS_WEBHOOK_SECRET", SECRET)
     client = Upstream([activity()], files={})  # no original available
 
-    service.on_webhook(conn, client, payload(uploaded()), DUBAI)
+    service.receive(conn, payload(uploaded()))
+    service.drain(conn, client, DUBAI)
     assert client.calls == ["activity", "original_file", "streams"], client.calls
 
 
@@ -321,7 +232,8 @@ def test_a_downloaded_file_lands_in_the_archive(
     monkeypatch.setenv("INTERVALS_WEBHOOK_SECRET", SECRET)
     client = Upstream([activity()], {"i1001": ride_fit()})
 
-    service.on_webhook(conn, client, payload(uploaded()), DUBAI)
+    service.receive(conn, payload(uploaded()))
+    service.drain(conn, client, DUBAI)
 
     with conn.cursor() as cur:
         cur.execute("select path, external_ref, session_id from fit_archive")
