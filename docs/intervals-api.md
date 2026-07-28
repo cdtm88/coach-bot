@@ -50,10 +50,11 @@ All six are properties of `Wellness`, alongside `weight` for HLTH-04:
 | Respiration | `respiration` |
 | SpO2 | `spO2` |
 
-This settles what the API *can* carry. It does not settle what the athlete's
-Whoop link actually populates, which is open item 3 and needs a real range read
-against his account. A field the schema defines but the feed leaves null is
-exactly the case RECOV-02 handles: recorded absent, dropped from the deviation.
+This settles what the API *can* carry. What the athlete's link actually
+populates was open item 3, and V3a below answered it on 28 July 2026: six of the
+seven fields arrive, `hrvSDNN` never does, and `weight` never does either. A
+field the schema defines but the feed leaves null is exactly the case RECOV-02
+handles: recorded absent, dropped from the deviation.
 
 ### A connected provider can overwrite an API written wellness value
 
@@ -72,6 +73,13 @@ locking is close to a one way door and should be deliberate rather than
 defensive. And this is a forum report rather than documented behaviour, so it
 needs confirming against the live account before HealthBridge writes anything.
 See V3 below.
+
+**V3a made this much less urgent.** No provider writes `weight` on this account —
+it was null on all 22 days read — so there is nothing currently resyncing over an
+API written value. The revert this section describes needs a competing writer and
+there is not one. That does not make `locked` wrong, but it does mean the one way
+door should stay shut until a revert is actually observed rather than being
+walked through defensively on the strength of a forum post. See V3b.
 
 `kcalConsumed` also exists on the schema. No current requirement needs it, but it
 is the natural home for a daily energy figure derived from MacroLog's per meal
@@ -107,10 +115,17 @@ on which endpoint produced the bytes. That is deliberate: httpx strips a
 alone, and the two are indistinguishable to the caller, so an endpoint based rule
 would be correct only by luck. Hashing happens after decompression.
 
-**Still unverified against the live service.** Nobody has yet fetched a real
-activity file and recorded whether the gzip arrives as transport encoding or as
-payload. The fix is correct under both, so this does not block anything, but the
-answer decides which failure the tests should simulate. See V2 below.
+**Verified 28 July 2026, and the answer is neither.** V2 fetched a real Zwift
+ride (`i169706449`, 68,547 bytes). The response carried `Content-Type:
+application/octet-stream` and `Content-Encoding: gzip`, and the first two bytes on
+arrival were `0e 20` — not the gzip magic `1f 8b`. So httpx had already stripped
+the encoding and handed back plain FIT bytes, which parsed cleanly into 609
+samples at 66.1 W average.
+
+That is the transport encoding case. The payload case was not observed, so the
+tests should simulate transport encoding as the normal path and keep a payload
+case as the defensive one — the sniff in `parse.decompressed` handles both and
+does not need to know which it is looking at.
 
 ## Analysis is asynchronous, and `analyzed` says so
 
@@ -338,10 +353,22 @@ developer offered to configure webhooks directly:
 Superseded by the self service management page later that year, but it suggests
 a friendly response to a single user asking.
 
-## Verification still outstanding
+## Verification
 
 Three empirical checks. Each is cheap, each needs the live API key, and each
-blocks something. Record the result here with the date when it is run.
+blocks something. V2 and V3a were run on 28 July 2026 and their results are
+recorded below and folded into the sections above. V1 and V3b are still
+outstanding, and V3b may no longer be worth running.
+
+### Rate limits, observed
+
+Neither `X-RateLimit-Limit` nor `X-RateLimit-Remaining` was present on any
+response during the V2 or V3a runs. The client parses them when they appear and
+degrades to "unknown" when they do not, which is what it did. So the headroom
+question that was meant to validate `COACH_POLL_INTERVAL_S=120` is unanswered
+from headers, and the 120 second interval stands on the arithmetic rather than on
+measurement: roughly 720 list calls a day plus one wellness call an hour. Nothing
+has been rate limited in practice. Revisit if a 429 ever appears.
 
 ### V1. External id scoping under an API key — blocks P08 and PLAN-02
 
@@ -362,25 +389,58 @@ populated. Publish again with the same `external_id` and a changed `name`, then
 confirm one event exists rather than two. Delete through `bulk-delete` by
 `external_id` and confirm the returned count is 1.
 
-### V2. File encoding on the wire — decides what the gzip tests simulate
+### V2. File encoding on the wire — **run 28 July 2026**
 
-Fetch `GET /activity/{id}/file` for a known Zwift ride and record the first two
-bytes and the `Content-Type` and `Content-Encoding` headers. This settles whether
-the gzip is transport encoding, which httpx strips, or payload, which it does
-not. The sniff based fix already in `parse.decompressed` is correct either way,
-so this blocks nothing; it tells us which failure mode the tests should reproduce.
+Fetched `GET /activity/i169706449/file`. Result recorded under "Activity files
+are served gzipped" above: 200, `Content-Encoding: gzip`, first two bytes `0e20`,
+parsed to 609 samples. httpx strips the encoding, so the bytes arrive plain. The
+sniff in `parse.decompressed` is correct either way and nothing changed.
 
-### V3. Wellness write persistence — blocks HealthBridge, resolves open items 1 and 2
+### V3a. Wellness read — **run 28 July 2026, resolves open items 1, 2 and 3**
 
-Read the last fortnight of wellness and record whether `weight` varies by date or
-repeats. Identical on every date means it is a static profile field copied
-upstream, which is actively harmful: the coach would anchor on a stale number and
-never notice. That is open item 1 as written.
+Read the last 21 days. 22 rows returned, 13 of them populated (the nine days
+before 16 July are empty).
 
-Then PUT a test weight for yesterday without `locked`, wait for a provider
-resync, and read it back. Repeat with `"locked": true`. Whichever survives
-decides how MacroLog writes body mass, and the answer must be recorded before
-anything fits a trend on that field.
+| Field | Populated |
+| --- | --- |
+| `sleepSecs`, `sleepScore`, `restingHR`, `hrv`, `readiness`, `respiration`, `spO2` | 13 of 22 |
+| `hrvSDNN` | **0 of 22** |
+| `weight` | **0 of 22** |
+
+Three consequences, all now folded into the code and the PRD.
+
+*Open item 1 is answered, and the answer was the third possibility nobody wrote
+down.* The question was whether `weight` moves day to day or repeats. It does
+neither: it is absent. So it is not a stale profile field the coach would anchor
+on — it is nothing at all, which is a better outcome than the harmful case and a
+worse one than the hoped-for case.
+
+*Open item 2 follows: HealthBridge is required.* Nothing feeds body mass, so
+HLTH-04's source does not exist until MacroLog writes it. That is the athlete's
+side of the setup guide's division of labour and no requirement in this
+repository covers it. P04's implementation gate does not depend on it — the trend
+and every threshold in it are tested on seeded data — but P04's validation gate
+cannot start until real readings arrive.
+
+*Open item 3 is answered: `hrvSDNN` never arrives.* RECOV-02 drops it from the
+deviation, which is the behaviour that requirement provides for rather than a
+defect. The other six fields all populate.
+
+### V3b. The wellness write — **probably not worth running**
+
+Originally: PUT a test weight without `locked`, wait for a provider resync, read
+it back, then repeat with `"locked": true`, and whichever survives decides how
+HealthBridge writes body mass.
+
+V3a undercut the premise. The revert this tests for needs a connected provider
+that writes `weight`, and this account has none — the field is null on every day.
+There is nothing to be overwritten by. Given that unlocking a day has no
+documented API path, running the locked half is walking through a one way door to
+answer a question the account no longer poses.
+
+Recommendation: have HealthBridge write `weight` without `locked`, watch whether
+a value ever reverts, and only then revisit. If one does revert, that is itself
+the finding and the locked variant can be tested on a day that does not matter.
 
 ## A note on reviewing this document
 

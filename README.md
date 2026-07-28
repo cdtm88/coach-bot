@@ -25,18 +25,21 @@ Fix the losing document in the same change (SPEC-02).
 
 ## Status
 
-**P00 to P03 are merged.** The memory store and its invariants, the
-conversational agent, nightly consolidation, and activity ingest with session
-reviews. 256 tests, all against a real Postgres.
+**P00 to P04 are built.** The memory store and its invariants, the
+conversational agent, nightly consolidation, activity ingest with session
+reviews, and now macros from MacroLog with the body mass trend read from
+intervals.icu wellness. 333 tests, all against a real Postgres.
 
-**P04 is next** and is blocked on one read against a live intervals.icu key:
+The live checks that gated P04 were run on 28 July 2026 and the headline is that
+**the wellness feed carries no weight at all.** Nothing feeds body mass until
+MacroLog's HealthBridge writes it, which is the athlete's to build and outside
+this repository. So the trend pipeline is complete, tested and empty: every
+threshold is asserted on seeded data and the empty series is the first case in
+the suite, so the first real reading starts a trend with no code change.
 
-```bash
-uv run python scripts/verify_intervals.py all    # read only
-```
-
-That answers where body mass comes from, which decides how much of P04 exists.
-See `docs/state-of-build.md` for what to do with the answer.
+**P05 is next** and is now small — P04 stored every wellness field while it was
+reading the feed, so what remains is the recovery deviation and the missing
+session cross check.
 
 Ingest needs no webhook. Zwift rides arrive through a watched folder with no API
 call at all; everything else arrives on a poll whose interval is configurable.
@@ -52,7 +55,7 @@ migrations/        numbered SQL, applied on boot
 prompts/persona.md the coach's voice, written from docs/seed/
 seeds/athlete.json the initial facts, each traced to the source transcript
 scripts/
-  verify_intervals.py  the three live-account checks that gate P04 and P08
+  verify_intervals.py  the live-account checks; V2 and V3a run, V1 gates P08
   dev-db.sh            throwaway Postgres for the suite
 src/coach/
   config.py        environment only; no credential defaults (SEC-01)
@@ -76,7 +79,13 @@ src/coach/
     reconcile.py   the poll and the bulk backfill
     service.py     the pipeline every ingest path calls
     webhook.py     the receiver and its delivery queue; idle without an app
-    server.py      the process: route, poll loop, sweep loop, queue worker
+    server.py      the process: routes, poll, wellness, sweep, queue worker
+  health/
+    macros.py      per-meal macros from MacroLog, idempotent on the meal id
+    wellness.py    the wellness read: body mass, and P05's recovery fields
+    bodymass.py    readings, the outlier gate, the gap, the rollup
+    trend.py       the weighted fit in SQL, and what it permits the coach to say
+    breaks.py      is today inside a break; the rest of BREAK-* lands in P10
 tests/             the acceptance criteria, as assertions
 ```
 
@@ -90,7 +99,7 @@ matters.
 ```bash
 uv sync --extra dev
 ./scripts/dev-db.sh start      # prints TEST_DATABASE_URL; export it
-uv run pytest -q               # 256 passing
+uv run pytest -q               # 333 passing
 ./scripts/dev-db.sh stop
 ```
 
@@ -102,6 +111,11 @@ own instance.
 **The system may reduce load autonomously and may never increase it.** Every
 requirement touching prescriptions inherits this. It is why `ADJ-02` rejects any
 generated change that raises computed weekly load.
+
+**The coach is given permissions, not numbers.** Body mass is the clearest case:
+the readings never enter the prompt, only a slope fitted in SQL and an explicit
+list of what the evidence supports. A model handed readings will compare two of
+them, which HLTH-09 forbids and which no amount of instruction reliably prevents.
 
 **Safety facts are not probabilistic.** Injury and medical constraints load
 verbatim into every prompt, never decay, and can only be written by the athlete

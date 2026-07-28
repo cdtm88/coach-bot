@@ -8,7 +8,11 @@
   `COACH_SWEEP_INTERVAL_S`. Separate because an 18 hour grace window has nothing
   to say to a question asked every two minutes.
 * `worker` — drains the webhook queue. Idle unless a webhook is configured.
-* The route itself, which only ever acknowledges.
+* `wellness_poller` — reads the intervals.icu wellness feed, which is where body
+  mass (HLTH-04) and recovery (RECOV-01) arrive from. Hourly by default: the
+  feed is written by a phone syncing overnight, so asking every two minutes
+  would spend rate limit on an answer that changes once a day.
+* The two routes, which only ever acknowledge.
 
 That last point is not an optimisation. intervals.icu retries any non-2xx with
 exponential backoff and treats a slow response as a failure, so if the webhook is
@@ -43,6 +47,8 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 
+from coach.health import macros as macromod
+from coach.health import wellness as wellnessmod
 from coach.ingest import client as clientmod
 from coach.ingest import reconcile as reconcilemod
 from coach.ingest import service
@@ -51,6 +57,15 @@ from coach.ingest import webhook as webhookmod
 log = logging.getLogger(__name__)
 
 ROUTE = "/webhook/intervals"
+
+# HLTH-01. The only other route the tunnel exposes, and the only one MacroLog
+# knows about. Named for its client rather than for its payload, because the next
+# thing MacroLog posts will be posted to a sibling of this rather than folded in.
+MACRO_ROUTE = "/macrolog/meals"
+
+# The wellness feed changes once a day, so it is read on its own slow clock
+# rather than on the two minute activity poll.
+DEFAULT_WELLNESS_INTERVAL_S = 3600
 
 # `db.connect` is a context manager factory; every caller here opens one
 # connection per request or per tick and lets the exit commit it.
@@ -63,19 +78,24 @@ MAX_BODY_BYTES = 1 << 20
 
 
 def make_handler(
-    connect: Connect, wake: Callable[[], None] = lambda: None
+    connect: Connect,
+    wake: Callable[[], None] = lambda: None,
+    tz: ZoneInfo | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Build the request handler bound to its dependencies.
 
-    Note what it does *not* take: no API client, no timezone, no note writer. The
-    handler cannot reach upstream or call a model even by accident, because it
-    holds nothing capable of it. That is PERF-03 enforced structurally rather
-    than by remembering to keep the route thin.
+    Note what it does *not* take: no API client, no note writer. The handler
+    cannot reach upstream or call a model even by accident, because it holds
+    nothing capable of it. That is PERF-03 enforced structurally rather than by
+    remembering to keep the route thin. The timezone is the one addition and it
+    is inert — TZ-01 needs it to decide which local day a meal belongs to, and a
+    ZoneInfo cannot make a network call.
 
     `wake` nudges the worker so a queued delivery is picked up immediately rather
     than on the next scheduled pass. Latency comes from that nudge; correctness
     does not depend on it.
     """
+    zone = tz or ZoneInfo(os.environ.get("COACH_TZ", "UTC"))
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "coach-bot"
@@ -97,30 +117,41 @@ def make_handler(
             self.end_headers()
             self.wfile.write(payload)
 
-        def do_POST(self) -> None:  # noqa: N802 - the stdlib's naming, not ours
-            if self.path.rstrip("/") != ROUTE:
-                self._reply(404, {"error": "no such route"})
-                return
-
+        def _body(self) -> dict[str, Any] | None:
+            """Read and parse the request body, or answer and return None."""
             try:
                 length = int(self.headers.get("Content-Length") or 0)
             except ValueError:
                 self._reply(400, {"error": "bad Content-Length"})
-                return
+                return None
             if length <= 0 or length > MAX_BODY_BYTES:
                 # Ruled on from the header alone, before a byte of the body is
                 # read. Reading it first to answer politely is the exhaustion the
                 # limit exists to prevent.
                 self._reply(413, {"error": "body missing or too large"}, close=True)
-                return
+                return None
 
             try:
                 payload = json.loads(self.rfile.read(length))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 self._reply(400, {"error": "body is not JSON"})
-                return
+                return None
             if not isinstance(payload, dict):
                 self._reply(400, {"error": "body is not an object"})
+                return None
+            return payload
+
+        def do_POST(self) -> None:  # noqa: N802 - the stdlib's naming, not ours
+            route = self.path.rstrip("/")
+            if route == MACRO_ROUTE:
+                self._macros()
+                return
+            if route != ROUTE:
+                self._reply(404, {"error": "no such route"})
+                return
+
+            payload = self._body()
+            if payload is None:
                 return
 
             try:
@@ -145,6 +176,51 @@ def make_handler(
             self._reply(200, {"queued": queued})
             wake()
 
+        def _macros(self) -> None:
+            """HLTH-01: MacroLog posts meals here.
+
+            Unlike the webhook route this one does the work inline. It is a
+            database write with no upstream call and no model call in it, so
+            there is nothing for a queue to buy — and MacroLog is our own client
+            on a phone, which would rather be told the meal landed than be told
+            it was queued.
+            """
+            payload = self._body()
+            if payload is None:
+                return
+
+            try:
+                macromod.verify(self.headers.get(macromod.SECRET_HEADER))
+            except macromod.Rejected as exc:
+                # SEC-02. Deliberately uninformative, as on the webhook route.
+                log.warning("rejected macro payload: %s", exc)
+                self._reply(401, {"error": "rejected"})
+                return
+
+            try:
+                with connect() as conn:
+                    result = macromod.apply(conn, payload, zone)
+            except macromod.Malformed as exc:
+                # Authenticated but unusable. Answered distinctly from a failed
+                # secret so a client with a correct secret is not sent looking
+                # for a credential problem it does not have.
+                self._reply(400, {"error": str(exc)})
+                return
+            except Exception:
+                log.exception("macro ingest failed")
+                self._reply(500, {"error": "internal error"})
+                return
+
+            self._reply(
+                200,
+                {
+                    "stored": result.stored,
+                    "updated": result.updated,
+                    "deleted": result.deleted,
+                    "errors": result.errors,
+                },
+            )
+
         def do_GET(self) -> None:  # noqa: N802 - the stdlib's naming, not ours
             if self.path.rstrip("/") == "/health":
                 self._reply(200, {"ok": True})
@@ -159,13 +235,14 @@ def serve(
     wake: Callable[[], None] = lambda: None,
     host: str = "127.0.0.1",
     port: int = 8080,
+    tz: ZoneInfo | None = None,
 ) -> ThreadingHTTPServer:
     """Bind and return the server without serving. The caller decides the loop.
 
     Bound to loopback by default: the tunnel is what makes it reachable, so
     binding to every interface would only widen the exposure.
     """
-    return ThreadingHTTPServer((host, port), make_handler(connect, wake))
+    return ThreadingHTTPServer((host, port), make_handler(connect, wake, tz))
 
 
 def worker(
@@ -264,6 +341,42 @@ def sweeper(
     _loop("sweep", stop, every, once)
 
 
+def wellness_poller(
+    connect: Connect,
+    client: clientmod.Intervals,
+    tz: ZoneInfo,
+    stop: threading.Event,
+    interval_s: int | None = None,
+) -> None:
+    """Read wellness on its own clock (HLTH-04, RECOV-01).
+
+    Slower than the activity poll on purpose. The feed is written by a phone
+    syncing overnight and by a Whoop link that publishes once a day, so a two
+    minute cadence would spend rate limit re-reading yesterday. The window is
+    wide and the upsert idempotent (RECOV-05), which means a missed pass costs
+    nothing and a late-arriving provider fill-in is picked up regardless.
+    """
+    every = interval_s if interval_s is not None else _wellness_interval_s()
+
+    def once() -> dict[str, Any]:
+        with connect() as conn:
+            synced = wellnessmod.sync(conn, client, wellnessmod.local_today(tz))
+        return {
+            "wellness_days": synced.days,
+            "body_mass_readings": synced.readings,
+            "held_for_confirmation": synced.held,
+            "errors": synced.errors,
+        }
+
+    _loop("wellness", stop, every, once)
+
+
+def _wellness_interval_s() -> int:
+    return reconcilemod.env_interval(
+        "COACH_WELLNESS_INTERVAL_S", DEFAULT_WELLNESS_INTERVAL_S, floor=300
+    )
+
+
 def main() -> None:
     """Run the webhook route and the backstop loop together."""
     from coach import db
@@ -298,12 +411,20 @@ def main() -> None:
             name="poll",
         ),
         threading.Thread(target=sweeper, args=(db.connect, tz, stop), daemon=True, name="sweep"),
+        # HLTH-04 and RECOV-01. Its own clock, because the wellness feed changes
+        # once a day and the activity poll runs every two minutes.
+        threading.Thread(
+            target=wellness_poller,
+            args=(db.connect, client, tz, stop),
+            daemon=True,
+            name="wellness",
+        ),
     ]
     for thread in threads:
         thread.start()
 
-    httpd = serve(db.connect, nudge.set, port=port)
-    log.info("ingest listening on %s%s", port, ROUTE)
+    httpd = serve(db.connect, nudge.set, port=port, tz=tz)
+    log.info("ingest listening on %s, routes %s and %s", port, ROUTE, MACRO_ROUTE)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
