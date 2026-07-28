@@ -2,13 +2,21 @@
 
 AI Cycling Coach · single-user Telegram coaching agent
 
+## Start here
+
+**[`docs/state-of-build.md`](docs/state-of-build.md)** — what is done, what is
+next, and the environment gotchas that will otherwise cost you an hour. Read it
+first in a new session.
+
 ## Documents
 
 | Document | Authoritative on |
 | --- | --- |
-| [`docs/prd.md`](docs/prd.md) | Scope, requirements, acceptance, phase completion |
+| [`docs/state-of-build.md`](docs/state-of-build.md) | Current state, next actions, working agreements |
+| [`docs/prd.md`](docs/prd.md) | Scope, requirements, acceptance, phase completion, open items |
 | [`docs/memory-design.md`](docs/memory-design.md) | Memory tiers, schema, key namespace, provenance, conflict matrix |
 | [`docs/setup.md`](docs/setup.md) | Accounts, credentials, tunnel, infrastructure |
+| [`docs/intervals-api.md`](docs/intervals-api.md) | What the intervals.icu API actually does, verified, with dates |
 | [`docs/prd-review.md`](docs/prd-review.md) | Record of the v2.1 review and what it changed |
 
 On conflict: the design wins on schema and memory semantics, the PRD wins on
@@ -17,8 +25,23 @@ Fix the losing document in the same change (SPEC-02).
 
 ## Status
 
-**P00, memory store and invariants.** Facts can be written, superseded and
-audited; the invariants are enforced by the database rather than by convention.
+**P00 to P03 are merged.** The memory store and its invariants, the
+conversational agent, nightly consolidation, and activity ingest with session
+reviews. 256 tests, all against a real Postgres.
+
+**P04 is next** and is blocked on one read against a live intervals.icu key:
+
+```bash
+uv run python scripts/verify_intervals.py all    # read only
+```
+
+That answers where body mass comes from, which decides how much of P04 exists.
+See `docs/state-of-build.md` for what to do with the answer.
+
+Ingest needs no webhook. Zwift rides arrive through a watched folder with no API
+call at all; everything else arrives on a poll whose interval is configurable.
+The webhook receiver is built and idle because registering an app requires a
+person at intervals.icu to approve one, and that was not worth blocking on.
 
 Later phases are in `docs/prd.md` section 4.
 
@@ -28,6 +51,9 @@ Later phases are in `docs/prd.md` section 4.
 migrations/        numbered SQL, applied on boot
 prompts/persona.md the coach's voice, written from docs/seed/
 seeds/athlete.json the initial facts, each traced to the source transcript
+scripts/
+  verify_intervals.py  the three live-account checks that gate P04 and P08
+  dev-db.sh            throwaway Postgres for the suite
 src/coach/
   config.py        environment only; no credential defaults (SEC-01)
   clock.py         local day and week boundaries (TZ-01/02/03)
@@ -41,7 +67,17 @@ src/coach/
     state.py       working memory and the pending queue (MEM-09, CONS-06)
     context.py     per turn assembly and the shedding order (MEM-10/11/13)
     export.py      the nightly markdown fact export (MEM-12)
-tests/             the P00 acceptance criteria, as assertions
+  ingest/
+    parse.py       samples in, computed values out; never a derived aggregate
+    client.py      the intervals.icu API, basic auth, rate limit headers
+    activities.py  an upstream activity to a session row
+    archive.py     the permanent local FIT archive; contains no delete (FIT-15)
+    review.py      prescription matching, compliance, reviews, missed sessions
+    reconcile.py   the poll and the bulk backfill
+    service.py     the pipeline every ingest path calls
+    webhook.py     the receiver and its delivery queue; idle without an app
+    server.py      the process: route, poll loop, sweep loop, queue worker
+tests/             the acceptance criteria, as assertions
 ```
 
 ## Development
@@ -52,9 +88,9 @@ constraint, transaction rollback. A mocked store would test nothing that
 matters.
 
 ```bash
-uv venv && uv pip install -e ".[dev]"
-./scripts/dev-db.sh start
-.venv/bin/python -m pytest
+uv sync --extra dev
+./scripts/dev-db.sh start      # prints TEST_DATABASE_URL; export it
+uv run pytest -q               # 256 passing
 ./scripts/dev-db.sh stop
 ```
 
