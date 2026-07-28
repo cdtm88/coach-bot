@@ -17,6 +17,7 @@ from typing import Any
 import psycopg
 
 from coach import clock
+from coach.blocks import document as blockmod
 from coach.calendars import availability as calmod
 from coach.memory import facts as factmod
 from coach.memory import notes as notemod
@@ -26,7 +27,6 @@ from coach.memory import state as statemod
 DEFERRED = {
     "log_session": "P10",
     "get_sessions": "P03",
-    "update_block": "P07",
     "write_session_events": "P08",
 }
 
@@ -133,7 +133,11 @@ SCHEMAS: list[dict[str, Any]] = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "section": {"type": "string"},
+                "section": {
+                    "type": "string",
+                    "enum": list(blockmod.SECTIONS),
+                    "description": "Which section to replace. Everything else is left alone.",
+                },
                 "content": {"type": "string"},
                 "reason": {"type": "string"},
             },
@@ -283,5 +287,21 @@ def dispatch(conn: psycopg.Connection, name: str, arguments: dict[str, Any]) -> 
                 "a guarantee that he is free at any other time."
             ),
         }
+
+    if name == "update_block":
+        # BLOCK-02: rewrite the affected section rather than regenerating the
+        # whole document. The tool takes a section for that reason — a whole
+        # document parameter would make the wholesale rewrite the easy path.
+        block = blockmod.active(conn)
+        if block is None:
+            return {"available": False, "reason": "there is no active training block yet"}
+        version = blockmod.rewrite(
+            conn,
+            block.id,
+            arguments["section"],
+            arguments["content"],
+            arguments["reason"],
+        )
+        return {"block_id": block.id, "version": version, "section": arguments["section"]}
 
     raise UnknownTool(name)  # pragma: no cover - unreachable given TOOL_NAMES

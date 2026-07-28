@@ -25,11 +25,13 @@ Fix the losing document in the same change (SPEC-02).
 
 ## Status
 
-**P00 to P06 are built — M1 and M2 complete.** The memory store and its
+**P00 to P07 are built; M1 and M2 are merged.** The memory store and its
 invariants, the conversational agent, nightly consolidation, activity ingest with
 session reviews, macros from MacroLog with the body mass trend read from
 intervals.icu wellness, recovery deviation computed against the athlete's own
-baseline, and the calendar feeds. 405 tests, all against a real Postgres.
+baseline, the calendar feeds, and now four week training blocks with cycling and
+gym prescriptions behind a constraint gate. 458 tests, all against a real
+Postgres.
 
 The live checks that gated P04 were run on 28 July 2026 and the headline is that
 **the wellness feed carries no weight at all.** Nothing feeds body mass until
@@ -38,8 +40,9 @@ this repository. So the trend pipeline is complete, tested and empty: every
 threshold is asserted on seeded data and the empty series is the first case in
 the suite, so the first real reading starts a trend with no code change.
 
-**P07 is next** — four week training blocks with cycling and gym prescriptions,
-the first phase of M3 and the first that writes rather than reads.
+**P08 is next** — publishing prescriptions to intervals.icu and detecting athlete
+edits. It is the first phase that writes *upstream*, and the one the V1 check
+gates.
 
 Ingest needs no webhook. Zwift rides arrive through a watched folder with no API
 call at all; everything else arrives on a poll whose interval is configurable.
@@ -90,6 +93,12 @@ src/coach/
   calendars/
     feed.py        secret iCal feeds; the URL is never stored and never logged
     availability.py  busy blocks to observed availability, through consolidation
+  blocks/
+    constraints.py the gate: what the athlete may not be asked to do (SAFE-04)
+    library.py     the exercise library and substitution (GYM-03)
+    load.py        one scale for cycling and gym, and the weekly ceiling
+    document.py    the versioned block markdown (BLOCK-01, BLOCK-02)
+    generate.py    a plan to prescriptions, validated before anything is written
 tests/             the acceptance criteria, as assertions
 ```
 
@@ -103,7 +112,7 @@ matters.
 ```bash
 uv sync --extra dev
 ./scripts/dev-db.sh start      # prints TEST_DATABASE_URL; export it
-uv run pytest -q               # 405 passing
+uv run pytest -q               # 458 passing
 ./scripts/dev-db.sh stop
 ```
 
@@ -126,6 +135,11 @@ says intervals.icu's derived fields are stored alongside parsed values and never
 substituted for them, and the same rule governs recovery: the deviation is built
 from measured signals, and Whoop's readiness score is shown next to it rather
 than summed into it.
+
+**A rule that cannot be verified fails closed.** P07's constraint gate refuses to
+generate a gym session when a constraint phrase matches nothing it understands,
+rather than programming as though the athlete were unconstrained. That is the
+governing asymmetry applied to ambiguity: the system fails toward less.
 
 **Safety facts are not probabilistic.** Injury and medical constraints load
 verbatim into every prompt, never decay, and can only be written by the athlete

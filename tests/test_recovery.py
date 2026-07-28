@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 
+import conftest
 from coach.agent import prompt
 from coach.health import recovery, wellness
 from coach.ingest import review
@@ -351,8 +352,8 @@ def prescribe(conn: psycopg.Connection, when: datetime, discipline: str = "ride"
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "insert into prescriptions (block_id, planned_for, discipline, spec) "
-            "values (1, %s, %s, '{}'::jsonb) returning id",
-            (when, discipline),
+            "values (%s, %s, %s, '{}'::jsonb) returning id",
+            (conftest.ensure_block(conn), when, discipline),
         )
         return cur.fetchone()["id"]
 

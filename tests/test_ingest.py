@@ -19,6 +19,8 @@ from zoneinfo import ZoneInfo
 import psycopg
 import pytest
 
+import conftest
+
 sys.path.insert(0, str(Path(__file__).parent))
 from coach.ingest import activities, archive, parse, reconcile, review, webhook  # noqa: E402
 from conftest_fit import build_fit  # noqa: E402
@@ -461,8 +463,13 @@ def prescribe(
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "insert into prescriptions (block_id, planned_for, discipline, spec) "
-            "values (1, %s, %s, %s) returning id",
-            (when, discipline, Jsonb(spec or {"duration_s": 3600, "target_watts": 80})),
+            "values (%s, %s, %s, %s) returning id",
+            (
+                conftest.ensure_block(conn),
+                when,
+                discipline,
+                Jsonb(spec or {"duration_s": 3600, "target_watts": 80}),
+            ),
         )
         return cur.fetchone()["id"]
 
