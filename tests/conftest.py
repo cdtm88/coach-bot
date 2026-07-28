@@ -77,3 +77,62 @@ def conn(template_db: str) -> Iterator[psycopg.Connection]:
         connection.close()
         with psycopg.connect(ADMIN_URL, autocommit=True) as admin:
             admin.execute(f'drop database if exists "{name}" with (force)')
+
+
+# --- shared ingest fixtures -------------------------------------------------
+#
+# Here rather than in one test module because two modules exercise the same
+# running endpoint, and a fixture imported across test files is a fixture that
+# silently stops being applied the moment the import is tidied away.
+
+WEBHOOK_SECRET = "s3cret-from-manage-app"
+
+
+@pytest.fixture
+def webhook_secret(monkeypatch: pytest.MonkeyPatch) -> str:
+    """SEC-02 refuses every payload when this is unset, which is the point.
+
+    Tests that exercise the happy path have to set it, so it is a fixture rather
+    than a line repeated in every one of them.
+    """
+    monkeypatch.setenv("INTERVALS_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    return WEBHOOK_SECRET
+
+
+@pytest.fixture
+def sandbox(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """Keep the FIT archive and the watched folder inside the test's directory."""
+    monkeypatch.setenv("COACH_FIT_ARCHIVE", str(tmp_path / "archive"))
+    monkeypatch.setenv("COACH_FIT_WATCH", str(tmp_path / "inbox"))
+    monkeypatch.setenv("INTERVALS_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    return tmp_path
+
+
+@pytest.fixture
+def endpoint(conn, sandbox):
+    """A real HTTP server on a real port, torn down after the test.
+
+    Returns a builder so each test picks its own upstream and note writer.
+    """
+    import sys
+    from pathlib import Path as _Path
+    from zoneinfo import ZoneInfo
+
+    sys.path.insert(0, str(_Path(__file__).parent))
+    from coach.ingest import service as _service
+    from ingest_harness import start_endpoint
+
+    started = []
+
+    def build(client, write_note=None):
+        endpoint_, httpd = start_endpoint(
+            conn, client, ZoneInfo("Asia/Dubai"), write_note or _service.no_review
+        )
+        started.append(httpd)
+        return endpoint_
+
+    yield build
+
+    for httpd in started:
+        httpd.shutdown()
+        httpd.server_close()

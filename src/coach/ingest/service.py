@@ -24,6 +24,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from coach.ingest import activities as actmod
 from coach.ingest import archive as archivemod
@@ -123,39 +124,105 @@ def watch_folder() -> Path:
     return Path(os.environ.get("COACH_FIT_WATCH", "var/fit-inbox"))
 
 
-def on_webhook(
+def receive(conn: psycopg.Connection, payload: dict[str, Any], secret: str | None = None) -> int:
+    """SEC-02 and PERF-03: verify and queue. Does no work and touches no network.
+
+    This is everything the HTTP handler is allowed to do before answering.
+    intervals.icu retries any non-2xx with exponential backoff, and it treats a
+    slow response as a failure — the developer found a `204` was being retried
+    until he fixed it — so the response has to be immediate and the work has to
+    happen after it.
+    """
+    return len(webhookmod.accept(conn, payload, secret))
+
+
+def drain(
     conn: psycopg.Connection,
     client: clientmod.Intervals,
-    payload: dict[str, Any],
     tz: ZoneInfo,
     write_note: Callable[[dict[str, Any]], str] = no_review,
-    secret: str | None = None,
+    limit: int = 10,
 ) -> list[Handled]:
-    """FIT-01, FIT-02, SEC-02: verify, de-replay, then act only on the trigger.
+    """Process queued deliveries. The work half of what `receive` accepted.
 
-    Non-trigger events are recorded and dropped. They matter for the audit trail
-    and for the wellness feed in P05, but this phase acts on uploads only.
+    A delivery that throws goes back to pending and is retried on the next pass
+    rather than being lost, which is the whole reason the queue exists.
     """
     handled: list[Handled] = []
-    for event in webhookmod.accept(conn, payload, secret):
-        if not event.is_trigger:
-            handled.append(Handled(skipped=f"{event.type} is not the ingest trigger"))
+    for delivery in webhookmod.claim(conn, limit):
+        try:
+            result = _handle_delivery(conn, client, delivery, tz, write_note)
+        except Exception as exc:  # noqa: BLE001 - one bad delivery must not stop the drain
+            log.exception("delivery %s failed", delivery["id"])
+            status = webhookmod.finish(conn, delivery["id"], ok=False, reason=str(exc))
+            handled.append(Handled(skipped=f"failed ({status}): {exc}"))
             continue
-        if not event.external_ref:
-            handled.append(Handled(skipped="trigger carried no activity id"))
-            continue
+        webhookmod.finish(conn, delivery["id"], ok=True, reason=result.skipped)
+        handled.append(result)
+    return handled
 
+
+def _handle_delivery(
+    conn: psycopg.Connection,
+    client: clientmod.Intervals,
+    delivery: dict[str, Any],
+    tz: ZoneInfo,
+    write_note: Callable[[dict[str, Any]], str],
+) -> Handled:
+    """One queued delivery, dispatched on its event type."""
+    kind = delivery["event_type"]
+    external_ref = delivery["external_ref"]
+
+    if kind == webhookmod.TRIGGER:
+        if not external_ref:
+            return Handled(skipped="trigger carried no activity id")
         # The webhook body carries the activity, but only some of it. Re-reading
         # gets the icu_ fields that FIT-03 stores as the platform's opinion.
-        try:
-            activity = client.activity(event.external_ref)
-        except clientmod.IntervalsError as exc:
-            log.warning("could not read activity %s: %s", event.external_ref, exc)
-            handled.append(Handled(skipped=f"upstream read failed: {exc}"))
-            continue
+        activity = client.activity(external_ref)
+        return on_activity(conn, client, activity, tz, write_note)
 
-        handled.append(on_activity(conn, client, activity, tz, write_note))
-    return handled
+    if kind == "ACTIVITY_ANALYZED":
+        return refresh_derived(conn, client, external_ref)
+
+    return Handled(skipped=f"{kind} recorded; no handler in this phase")
+
+
+def refresh_derived(
+    conn: psycopg.Connection, client: clientmod.Intervals, external_ref: str | None
+) -> Handled:
+    """Update the platform's numbers on a session that already exists.
+
+    ACTIVITY_UPLOADED fires before the platform has finished consolidating, so
+    the icu_ fields read at trigger time are provisional and `analyzed` is null.
+    ACTIVITY_ANALYZED is the signal they are final. Only the derived block and
+    the analysis stamp are touched: FIT-03's parsed columns came from samples and
+    have nothing to learn from a later read, and no review is generated, because
+    the ride was already reviewed when it landed.
+    """
+    if not external_ref:
+        return Handled(skipped="analysis event carried no activity id")
+
+    with conn.cursor() as cur:
+        cur.execute("select id from sessions where external_ref = %s", (external_ref,))
+        row = cur.fetchone()
+    if row is None:
+        return Handled(skipped="no local session for this activity yet")
+
+    activity = client.activity(external_ref)
+    analyzed_at = actmod.analyzed_at_of(activity)
+
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "update sessions set derived = %s, analyzed_at = %s, derived_provisional = %s "
+            "where id = %s",
+            (
+                Jsonb(actmod.derived_fields(activity)),
+                analyzed_at,
+                analyzed_at is None,
+                row["id"],
+            ),
+        )
+    return Handled(session_id=row["id"], created=False, skipped="derived fields refreshed")
 
 
 def tick(

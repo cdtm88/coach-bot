@@ -422,14 +422,16 @@ def test_a_file_can_be_replayed_upstream(conn: psycopg.Connection, tmp_path: Pat
     """FIT-16: the archive restores upstream through the upload endpoint."""
     path = tmp_path / "ride.fit"
     path.write_bytes(ride_fit())
-    archive.ingest_file(conn, path, DUBAI)
+    session_id = archive.ingest_file(conn, path, DUBAI)
     conn.commit()
 
-    uploads: list[tuple[str, int]] = []
+    uploads: list[tuple[str, int, str | None]] = []
 
     class FakeClient:
-        def upload_file(self, data: bytes, filename: str) -> dict[str, Any]:
-            uploads.append((filename, len(data)))
+        def upload_file(
+            self, data: bytes, filename: str, external_id: str | None = None
+        ) -> dict[str, Any]:
+            uploads.append((filename, len(data), external_id))
             return {"id": "i7777"}
 
     row = archive.restorable(conn)[0]
@@ -437,7 +439,10 @@ def test_a_file_can_be_replayed_upstream(conn: psycopg.Connection, tmp_path: Pat
     conn.commit()
 
     assert result["id"] == "i7777"
-    assert uploads == [("ride.fit", path.stat().st_size)]
+    # FIT-16 plus FIT-17: the restore carries the coach marker keyed to the local
+    # session, so the ride coming back through ingest matches rather than
+    # duplicating. A restore that produced a second row would be a poor repair.
+    assert uploads == [("ride.fit", path.stat().st_size, f"{activities.COACH_MARKER}{session_id}")]
     with conn.cursor() as cur:
         cur.execute("select external_ref, restored_at from fit_archive where id = %s", (row["id"],))
         restored = cur.fetchone()

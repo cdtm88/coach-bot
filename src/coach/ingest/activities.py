@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -64,6 +64,24 @@ def derived_fields(activity: dict[str, Any]) -> dict[str, Any]:
 def is_coach_authored(activity: dict[str, Any]) -> bool:
     external = activity.get("external_id") or ""
     return isinstance(external, str) and external.startswith(COACH_MARKER)
+
+
+def analyzed_at_of(activity: dict[str, Any]) -> datetime | None:
+    """When the platform finished consolidating, or None if it has not.
+
+    Null here means every `icu_` field on the same read is provisional. The
+    webhook trigger fires on upload, which is before analysis completes, so this
+    being null at ingest time is the normal case rather than the exception.
+    """
+    raw = activity.get("analyzed")
+    if not raw:
+        return None
+    try:
+        moment = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        log.warning("activity %s has an unreadable analyzed stamp %r", activity.get("id"), raw)
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
 
 
 def started_at_of(activity: dict[str, Any], tz: ZoneInfo) -> datetime:
@@ -153,6 +171,9 @@ def ingest(
     discipline = discipline_of(activity)
 
     hash_ = parse.content_hash(file_bytes) if file_bytes else None
+    # Null until the platform finishes; see analyzed_at_of. Recorded so the
+    # ACTIVITY_ANALYZED refresh knows which rows still carry provisional numbers.
+    analyzed = analyzed_at_of(activity)
 
     parsed = parse.Parsed()
     if file_bytes:
@@ -197,6 +218,8 @@ def ingest(
         parsed.avg_cadence,
         parsed.sample_count,
         Jsonb(derived_fields(activity)),
+        analyzed,
+        analyzed is None,
         is_coach_authored(activity),
         backfilled,
     )
@@ -212,7 +235,8 @@ def ingest(
                     started_at = %s, local_date = %s, duration_s = %s, distance_m = %s,
                     elevation_m = %s, avg_power_w = %s, np_power_w = %s, max_power_w = %s,
                     avg_hr = %s, max_hr = %s, avg_cadence = %s, sample_count = %s,
-                    derived = %s, coach_authored = %s, backfilled = %s
+                    derived = %s, analyzed_at = %s, derived_provisional = %s,
+                    coach_authored = %s, backfilled = %s
                 where id = %s
                 """,
                 (*values, session_id),
@@ -225,9 +249,10 @@ def ingest(
                 (external_ref, content_hash, source, discipline, activity_type, name,
                  started_at, local_date, duration_s, distance_m, elevation_m,
                  avg_power_w, np_power_w, max_power_w, avg_hr, max_hr, avg_cadence,
-                 sample_count, derived, coach_authored, backfilled)
+                 sample_count, derived, analyzed_at, derived_provisional,
+                 coach_authored, backfilled)
             values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s)
+                    %s, %s, %s, %s, %s)
             returning id
             """,
             values,

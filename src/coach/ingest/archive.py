@@ -133,15 +133,22 @@ def restorable(conn: psycopg.Connection, external_ref: str | None = None) -> lis
 
 
 def restore(conn: psycopg.Connection, client: Any, archive_id: int) -> dict[str, Any]:
-    """FIT-16: loop an archived file back through the upload endpoint."""
+    """FIT-16: loop an archived file back through the upload endpoint.
+
+    The upload carries the coach marker keyed to the local session, so when the
+    restored ride returns through the webhook FIT-17 matches it to the row that
+    already exists instead of creating a second one. A restore that produced a
+    duplicate would be a strange way to repair an archive.
+    """
     with conn.cursor() as cur:
-        cur.execute("select path from fit_archive where id = %s", (archive_id,))
+        cur.execute("select path, session_id from fit_archive where id = %s", (archive_id,))
         row = cur.fetchone()
     if row is None:
         raise ValueError(f"no archive row {archive_id}")
 
     path = Path(row["path"])
-    result = client.upload_file(path.read_bytes(), path.name)
+    marker = f"{actmod.COACH_MARKER}{row['session_id']}" if row["session_id"] is not None else None
+    result = client.upload_file(path.read_bytes(), path.name, external_id=marker)
 
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(

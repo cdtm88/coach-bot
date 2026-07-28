@@ -6,7 +6,18 @@ files rather than a stand-in. fit-tool writes them; fitdecode reads them back.
 
 from __future__ import annotations
 
+import gzip
 from datetime import datetime
+
+
+def gzipped(data: bytes) -> bytes:
+    """Wrap FIT bytes the way intervals.icu serves an original file.
+
+    The download endpoint returns gzip; the cookbook's own example writes the
+    response to `activity.fit.gz`. Tests that build only plain files cannot see
+    the difference, which is exactly how the missing decompression went unnoticed.
+    """
+    return gzip.compress(data)
 
 
 def build_fit(
