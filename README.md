@@ -25,10 +25,11 @@ Fix the losing document in the same change (SPEC-02).
 
 ## Status
 
-**P00 to P04 are built.** The memory store and its invariants, the
+**P00 to P05 are built.** The memory store and its invariants, the
 conversational agent, nightly consolidation, activity ingest with session
-reviews, and now macros from MacroLog with the body mass trend read from
-intervals.icu wellness. 333 tests, all against a real Postgres.
+reviews, macros from MacroLog with the body mass trend read from intervals.icu
+wellness, and recovery deviation computed against the athlete's own baseline.
+366 tests, all against a real Postgres.
 
 The live checks that gated P04 were run on 28 July 2026 and the headline is that
 **the wellness feed carries no weight at all.** Nothing feeds body mass until
@@ -37,9 +38,8 @@ this repository. So the trend pipeline is complete, tested and empty: every
 threshold is asserted on seeded data and the empty series is the first case in
 the suite, so the first real reading starts a trend with no code change.
 
-**P05 is next** and is now small — P04 stored every wellness field while it was
-reading the feed, so what remains is the recovery deviation and the missing
-session cross check.
+**P06 is next** — the calendar feeds, and the last phase of M2. It needs only
+secret iCal URLs in the environment.
 
 Ingest needs no webhook. Zwift rides arrive through a watched folder with no API
 call at all; everything else arrives on a poll whose interval is configurable.
@@ -84,6 +84,7 @@ src/coach/
     macros.py      per-meal macros from MacroLog, idempotent on the meal id
     wellness.py    the wellness read: body mass, and P05's recovery fields
     bodymass.py    readings, the outlier gate, the gap, the rollup
+    recovery.py    the local deviation; the platform's score never an input
     trend.py       the weighted fit in SQL, and what it permits the coach to say
     breaks.py      is today inside a break; the rest of BREAK-* lands in P10
 tests/             the acceptance criteria, as assertions
@@ -99,7 +100,7 @@ matters.
 ```bash
 uv sync --extra dev
 ./scripts/dev-db.sh start      # prints TEST_DATABASE_URL; export it
-uv run pytest -q               # 333 passing
+uv run pytest -q               # 366 passing
 ./scripts/dev-db.sh stop
 ```
 
@@ -116,6 +117,12 @@ generated change that raises computed weekly load.
 the readings never enter the prompt, only a slope fitted in SQL and an explicit
 list of what the evidence supports. A model handed readings will compare two of
 them, which HLTH-09 forbids and which no amount of instruction reliably prevents.
+
+**The platform's opinion sits beside our arithmetic, never inside it.** FIT-03
+says intervals.icu's derived fields are stored alongside parsed values and never
+substituted for them, and the same rule governs recovery: the deviation is built
+from measured signals, and Whoop's readiness score is shown next to it rather
+than summed into it.
 
 **Safety facts are not probabilistic.** Injury and medical constraints load
 verbatim into every prompt, never decay, and can only be written by the athlete

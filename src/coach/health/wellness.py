@@ -37,7 +37,7 @@ from zoneinfo import ZoneInfo
 import psycopg
 from psycopg.types.json import Jsonb
 
-from coach.health import bodymass
+from coach.health import bodymass, recovery
 from coach.ingest import client as clientmod
 
 log = logging.getLogger(__name__)
@@ -52,10 +52,14 @@ DEFAULT_LOOKBACK_DAYS = 21
 # silently become a column and, more to the point, so `bodyFat` cannot: HLTH-14
 # excludes body fat from v1 and the exclusion has to be visible somewhere a
 # reviewer will look.
-FIELDS: dict[str, str] = {
+#
+# HLTH-04's field and RECOV-02's six. Absence here is reported, because these are
+# the ones a requirement expects to find.
+RECOVERY_FIELDS: dict[str, str] = {
     "weight": "weight_kg",
     "sleepSecs": "sleep_secs",
     "sleepScore": "sleep_score",
+    "sleepQuality": "sleep_quality",
     "restingHR": "resting_hr",
     "hrv": "hrv",
     "hrvSDNN": "hrv_sdnn",
@@ -64,7 +68,37 @@ FIELDS: dict[str, str] = {
     "spO2": "spo2",
 }
 
+# The platform's training load curves. RECOV-06 needs `atlLoad` — the day's load
+# — to tell a missed session from a missing upload. `ctl` and `atl` are the
+# fitness and fatigue curves that make a day's load readable; both are the
+# platform's arithmetic and neither is ever substituted for something computed
+# locally, per FIT-03.
+LOAD_FIELDS: dict[str, str] = {
+    "ctl": "ctl",
+    "atl": "atl",
+    "ctlLoad": "ctl_load",
+    "atlLoad": "atl_load",
+    "rampRate": "ramp_rate",
+}
+
+FIELDS: dict[str, str] = {**RECOVERY_FIELDS, **LOAD_FIELDS}
+
 INTEGER_COLUMNS = frozenset({"sleep_secs", "resting_hr"})
+
+# Read on 28 July 2026 and deliberately not stored. `tempWeight` is populated on
+# every day, which makes it look like the body mass source HLTH-04 is missing —
+# and it is not. Across 22 days it carried **two distinct values one kilogram
+# apart**, alternating between them. That is a carried-forward or rounded stand-in
+# the platform keeps for its power-to-weight arithmetic, not a measurement
+# series, and `tempRestingHR` behaves the same way beside a `restingHR` that
+# carries real values on 13 days.
+#
+# This is the harmful case open item 1 was written to catch, arriving under a
+# field name the item did not anticipate. Fitting a 28 day trend on it would
+# produce a confident line through two numbers and look exactly like data. Named
+# here so that the next person to notice the weight trend is empty finds the
+# reason rather than the workaround.
+NEVER_STORED = ("tempWeight", "tempRestingHR")
 
 
 @dataclass
@@ -140,7 +174,10 @@ def store(conn: psycopg.Connection, rows: list[dict[str, Any]]) -> Synced:
             if recorded.held_for_confirmation:
                 result.held += 1
 
-    result.fields_absent = set(FIELDS) - populated
+    # Only the fields a requirement expects. A load curve the platform did not
+    # publish is not a RECOV-02 absence and reporting it as one would bury the
+    # ones that matter.
+    result.fields_absent = set(RECOVERY_FIELDS) - populated
     return result
 
 
@@ -190,6 +227,7 @@ def sync(
         log.info("wellness fields absent across this window: %s", sorted(result.fields_absent))
 
     bodymass.recompute(conn, today)
+    recovery.recompute(conn, today)  # RECOV-04
     _record_feed(conn, "wellness", ok=True)
     _record_body_mass_feed(conn)
     return result

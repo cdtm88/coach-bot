@@ -37,6 +37,56 @@ generated and posted as multipart if the endpoint were unavailable. It is
 available and takes JSON, so that branch is dead and the requirement is
 simplified accordingly.
 
+## What the wellness feed actually returns
+
+Read on 28 July 2026 across 21 days: 22 rows, 46 distinct keys, 18 of them
+populated on at least one day. This is the census, because the schema says what
+*can* arrive and only a read says what does.
+
+| Key | Populated | Used for |
+| --- | --- | --- |
+| `hrv`, `restingHR`, `sleepSecs`, `sleepScore`, `sleepQuality`, `respiration`, `spO2` | 13 of 22 | RECOV-02 storage, RECOV-04 deviation |
+| `readiness` | 13 of 22 | Stored and shown; never an input to RECOV-04 |
+| `ctl`, `atl`, `ctlLoad`, `atlLoad`, `rampRate` | 22 of 22 | RECOV-06's load signal |
+| `tempWeight`, `tempRestingHR` | 22 of 22 | **Nothing. See below.** |
+| `sportInfo`, `updated`, `id` | 22 of 22 | Metadata |
+| `hrvSDNN`, `weight`, `bodyFat`, `locked`, `steps`, `vo2max`, `kcalConsumed`, and 21 others | never | — |
+
+### `tempWeight` is not a body mass reading, and it looks exactly like one
+
+This is the trap worth naming, because it is the obvious fix for HLTH-04 having
+no source and it is wrong.
+
+`weight` is null on every day and `tempWeight` is populated on every day. Across
+the 22 day window `tempWeight` carried **two distinct values, one kilogram
+apart**, alternating between them eight times. That is a carried-forward or
+rounded stand-in the platform keeps so power-to-weight arithmetic has a number,
+not a measurement series. `tempRestingHR` behaves identically — two distinct
+values across 22 days — beside a `restingHR` that carries real values on 13.
+
+Fitting HLTH-06's 28 day trend on that would draw a confident line through two
+numbers and present it as a weight trend. It is precisely the harmful case open
+item 1 was written to catch, arriving under a field name the item did not
+anticipate. `coach.health.wellness.NEVER_STORED` names both fields and a test
+asserts they do not reach the readings table.
+
+### `atlLoad` is a real load signal
+
+Populated on all 22 days: zero on eight, non-zero on fourteen. That makes
+RECOV-06's cross check an actual distinction rather than a hypothetical one —
+load recorded with no local activity means the upload is missing, not the
+session. Note the third state: **no wellness row at all is not a recorded zero**,
+and the code returns `None` rather than `False` for it, because absence of data
+is never evidence of absence of activity.
+
+### `sportInfo` carries a per-sport eFTP
+
+Shape: `[{"type": "Ride", "eftp": 114.0, "wPrime": 8516.0, "pMax": 345.0}]`.
+Nothing reads it yet. It is the natural source for `physiology.ftp_watts` when
+BLOCK-06's ramp test is not the most recent evidence, and it is the same
+information `SPORT_SETTINGS_UPDATED` would push if webhooks were ever turned on.
+Recorded so it is not rediscovered.
+
 ## RECOV-02: the six fields exist on the schema
 
 All six are properties of `Wellness`, alongside `weight` for HLTH-04:

@@ -303,7 +303,7 @@ All authentication is by API key or secret URL. No OAuth anywhere, and no third 
 | --- | --- | --- | --- | --- |
 | Activities (in) | intervals.icu webhook on upload, API key basic auth, original file pulled | On upload, 6h reconcile | Zwift and any device connected upstream | 7d |
 | FIT archive (in) | Local watched folder, first class path and the only copy upstream cannot delete | On file arrival | Every ride, retained permanently | 7d |
-| Wellness (in) | intervals.icu wellness endpoint, fed by the Whoop link | Daily plus reconcile | Sleep, resting HR, HRV, recovery, respiration, SpO2. No activities. | 48h |
+| Wellness (in) | intervals.icu wellness endpoint, fed by the Whoop link | Hourly | Sleep, resting HR, HRV, recovery, respiration, SpO2, plus the platform's CTL/ATL load curves. No activities. | 48h |
 | Body mass (in) | MacroLog HealthBridge writes to intervals.icu wellness; the coach reads it back | On app launch | 2 to 3 readings per week, read as a time weighted trend over 28 days | 12d |
 
 **Verified 28 July 2026: the wellness feed carries no `weight` at all**, on any of the 22 days read. So the body mass row above describes a pipeline whose upstream half does not exist yet — HealthBridge is required rather than optional, and it is outside this repository. The read side is built and idle. Note also that the body mass feed is stale 12 days after a *reading*, not after a successful fetch: one call serves two feeds and a healthy wellness endpoint returning no weight must not reset the weight clock. HLTH-15 additionally keeps body mass out of the generic staleness block entirely, so the coach's one weigh in mention has a single owner.
@@ -312,6 +312,8 @@ All authentication is by API key or secret URL. No OAuth anywhere, and no third 
 | Manual activities (out) | Gym and golf written back as manual activities | On conversational capture | Keeps the training load chart complete. Lower priority. | n/a |
 | Calendar | Google secret iCal feed URLs, read only | Every 6h | Busy time including golf, work and travel | 24h |
 | Conversation | Telegram text and transcribed voice notes | On receipt | Gym sessions, golf rounds, everything a sensor cannot see | n/a |
+
+**The load curves are why the wellness feed is not only about recovery.** `atlLoad` records the training load the platform attributed to a day, and it is populated whether or not an activity reached us. RECOV-06 turns on that: load recorded with no local activity means the upload is missing, not the session. Its third state matters as much as the first two — an absent wellness row is not a recorded zero, and the code distinguishes them.
 
 **Hard rule.** Absence of data is never evidence of absence of activity. If a feed is stale past its threshold, the fact is injected into the prompt and the coach asks rather than inferring a missed session or a stalled weight trend.
 

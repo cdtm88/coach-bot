@@ -160,6 +160,7 @@ def test_the_live_shape_stores_recovery_and_no_weight(conn: psycopg.Connection) 
                 1,
                 sleepSecs=27000,
                 sleepScore=76,
+                sleepQuality=3,
                 restingHR=64,
                 hrv=45.9,
                 readiness=77,

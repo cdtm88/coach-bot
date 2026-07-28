@@ -19,7 +19,7 @@ import psycopg
 
 from coach import clock
 from coach.agent import persona
-from coach.health import bodymass
+from coach.health import bodymass, recovery
 from coach.memory import context as ctxmod
 from coach.memory import facts as factmod
 from coach.memory import keys as keymod
@@ -128,6 +128,15 @@ def render_body_mass(conn: psycopg.Connection, now: datetime, tz: ZoneInfo) -> s
     return bodymass.context(conn, clock.local_day(now, tz))
 
 
+def render_recovery(conn: psycopg.Connection, now: datetime, tz: ZoneInfo) -> str:
+    """RECOV-04's local deviation, with the platform's score labelled as theirs.
+
+    Empty when the feed has not carried enough history to standardise anything,
+    which is the honest state rather than a zero.
+    """
+    return recovery.context(conn, clock.local_day(now, tz))
+
+
 def render_interruption(claimed: Any | None) -> str:
     """The one item the coach may raise this conversation, if any (CHAT-11)."""
     if claimed is None:
@@ -167,6 +176,7 @@ def assemble(
         "constraints": render_constraints(conn),
         "facts": render_facts(conn),
         "body_mass": render_body_mass(conn, now, tz or configured_tz()),
+        "recovery": render_recovery(conn, now, tz or configured_tz()),
         "block_detail": block_detail,
         "continuity_note": render_continuity(conn),
         "staleness": render_staleness(conn, now),

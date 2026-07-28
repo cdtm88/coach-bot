@@ -18,14 +18,12 @@
 | — | Poll-based ingest; the webhook dependency is gone (PR #8) | merged |
 | — | Handover doc and the three scripted live checks (PR #9) | merged |
 | P04 | Macros from MacroLog, body mass from wellness (HLTH-01 to HLTH-16) | built |
+| P05 | Recovery from wellness (RECOV-01 to RECOV-06) | built |
 
-333 tests, all against a real Postgres. Schema is at migration 007.
+366 tests, all against a real Postgres. Schema is at migration 008.
 
-**Next phase is P05**, and it is now small. P04 read the wellness feed for body
-mass and stored every field on it while it was there, which landed RECOV-01,
-RECOV-02 and RECOV-05. What is left is RECOV-04, the recovery deviation against
-the athlete's own 28 day baseline, and RECOV-06, using recovery and load to
-disambiguate a missing session. Nothing blocks it.
+**Next phase is P06**, the calendar feeds (CALR-01 to CALR-06). Nothing blocks
+it: it needs only secret iCal URLs in the environment, and it is the last of M2.
 
 ## How ingest actually works now
 
@@ -80,10 +78,32 @@ shared secret in an `X-Coach-Secret` header — a different secret from the
 intervals.icu webhook, deliberately. Meals are stored per meal, never as daily
 totals; the daily total is a query.
 
+## How recovery works
+
+Same shape, one rule doing the work. RECOV-04 says the deviation is computed
+"against the athlete's own 28 day baseline, **not against platform derived
+scores**", and the second half is the one that is easy to lose. `readiness` is
+Whoop's recovery percentage arriving through intervals.icu, and a composite that
+included it would be a rebadged Whoop score wearing the word "local".
+
+So the deviation is built from measured signals only — HRV, resting HR, sleep
+duration, respiration, SpO2 — each standardised against the athlete's own
+trailing 28 days of that same field and oriented so positive means better than
+his baseline. `readiness` is stored and shown to the coach beside the local
+figure, labelled as the platform's opinion, with nowhere to enter the arithmetic
+from. That is the FIT-03 rule applied to wellness.
+
+Two behaviours that look like edge cases and are not. A field the feed withholds
+is dropped rather than defaulted, which is how `hrvSDNN` needs no special
+handling at all. And a baseline with no variance produces no deviation rather
+than a division — worth knowing, because a fixture with identical values every
+day will silently test the refusal path instead of the one you meant.
+
 ## What the live checks found
 
-V2 and V3a were run on 28 July 2026. Full results are in
-`docs/intervals-api.md`; the two that change what gets built:
+V2 and V3a were run on 28 July 2026, and a fuller field census followed while
+building P05. Full results are in `docs/intervals-api.md`; the ones that change
+what gets built:
 
 **There is no weight in the wellness feed.** Not stale, not repeated — absent, on
 all 22 days read. So HealthBridge is required (open item 2, resolved), it is the
@@ -96,6 +116,20 @@ validation gate cannot start yet**, which is tracked and does not block P05.
 **`hrvSDNN` never arrives** while the other six RECOV-02 fields do (13 of 22
 days). RECOV-02 drops it from the deviation, which is the requirement working
 rather than a bug. Open item 3, resolved.
+
+**`tempWeight` is populated on every day and must never be used.** This is the
+trap this project came closest to walking into, because it is the obvious fix for
+the weight trend being empty. Across 22 days it carried two distinct values one
+kilogram apart, alternating between them — a carried-forward stand-in the
+platform keeps so power-to-weight arithmetic has a number, not a measurement
+series. `tempRestingHR` behaves the same way. Fitting HLTH-06's trend on it would
+draw a confident line through two numbers and present it as data. Both are named
+in `wellness.NEVER_STORED` with a test.
+
+**`atlLoad` is a real load signal**, populated on all 22 days and zero on eight
+of them. That is what makes RECOV-06's cross check a distinction rather than a
+hypothetical: load recorded with no local activity means the upload is missing,
+not the session.
 
 Two smaller things worth not rediscovering. The activity file arrives with
 `Content-Encoding: gzip` already stripped by httpx, so the bytes are plain FIT on
