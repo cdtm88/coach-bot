@@ -73,10 +73,18 @@ def connector(conn: psycopg.Connection):
     return connect
 
 
-def post(url: str, body: Any, raw: bytes | None = None) -> tuple[int, dict[str, Any]]:
+def post(
+    url: str,
+    body: Any,
+    raw: bytes | None = None,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, dict[str, Any]]:
     data = raw if raw is not None else json.dumps(body).encode()
     request = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}, method="POST"
+        url,
+        data=data,
+        headers={"Content-Type": "application/json", **(headers or {})},
+        method="POST",
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
@@ -104,6 +112,15 @@ class Endpoint:
         status, reply = self.post(body)
         return status, reply, (self.drain() if status == 200 else [])
 
+    def post_macros(
+        self, body: Any, secret: str | None = None, path: str | None = None
+    ) -> tuple[int, dict[str, Any]]:
+        """HLTH-01: the MacroLog route, which authenticates on a header."""
+        from coach.health import macros
+
+        headers = {macros.SECRET_HEADER: secret} if secret is not None else None
+        return post(f"{self.url}{path or server.MACRO_ROUTE}", body, headers=headers)
+
 
 def start_endpoint(
     conn: psycopg.Connection,
@@ -112,7 +129,7 @@ def start_endpoint(
     write_note: Callable[[dict[str, Any]], str],
 ) -> tuple[Endpoint, Any]:
     """Bind a real server on an ephemeral port and serve it on a thread."""
-    httpd = server.serve(connector(conn), port=0)
+    httpd = server.serve(connector(conn), port=0, tz=tz)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     endpoint = Endpoint(
         url=f"http://127.0.0.1:{httpd.server_address[1]}",

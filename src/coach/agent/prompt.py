@@ -12,10 +12,14 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import psycopg
 
+from coach import clock
 from coach.agent import persona
+from coach.calendars import availability as calmod
+from coach.health import bodymass, recovery
 from coach.memory import context as ctxmod
 from coach.memory import facts as factmod
 from coach.memory import keys as keymod
@@ -72,13 +76,22 @@ def render_staleness(conn: psycopg.Connection, now: datetime) -> str:
 
     This is context, never an interruption — CHAT-11 is explicit that feed
     staleness shapes reasoning and does not consume the budget.
+
+    `body_mass` is excluded, and its exclusion is a requirement rather than a
+    tidy-up. HLTH-15 says the weigh in mention is the only one in the system and
+    that "the generic feed staleness mechanism never emits a body mass mention of
+    its own". A block that lists the feed and invites the coach to ask about it is
+    exactly such a mention. The feed row is still maintained for OBS-05; what
+    changes is who is allowed to speak about it, which is
+    :func:`render_body_mass` and nothing else.
     """
     with conn.cursor() as cur:
         cur.execute(
             """
             select name, last_success_at, stale_after_hours from feeds
-            where last_success_at is null
-               or last_success_at < %s - (stale_after_hours * interval '1 hour')
+            where name <> 'body_mass'
+              and (last_success_at is null
+                   or last_success_at < %s - (stale_after_hours * interval '1 hour'))
             order by name
             """,
             (now,),
@@ -96,6 +109,44 @@ def render_staleness(conn: psycopg.Connection, now: datetime) -> str:
         seen = feed["last_success_at"].strftime("%Y-%m-%d") if feed["last_success_at"] else "never"
         lines.append(f"- {feed['name']}: last success {seen}")
     return "\n".join(lines)
+
+
+def render_body_mass(conn: psycopg.Connection, now: datetime, tz: ZoneInfo) -> str:
+    """The weight trend, rendered as permissions rather than as numbers.
+
+    This is the load bearing half of P04. The HLTH requirements are almost all
+    statements about what the coach may say — a direction needs three readings, a
+    rate needs six across three weeks, a plateau needs four weeks with weekly
+    coverage — and a model handed a list of readings will honour none of them,
+    because the arithmetic is trivial and the restraint is not.
+
+    So the readings never enter the context. What enters is a fitted slope, a
+    range computed in SQL, and an explicit statement of which claims the current
+    evidence supports. HLTH-09 then costs nothing to obey: there is no pair of
+    readings in the prompt to compare.
+    """
+    return bodymass.context(conn, clock.local_day(now, tz))
+
+
+def render_recovery(conn: psycopg.Connection, now: datetime, tz: ZoneInfo) -> str:
+    """RECOV-04's local deviation, with the platform's score labelled as theirs.
+
+    Empty when the feed has not carried enough history to standardise anything,
+    which is the honest state rather than a zero.
+    """
+    return recovery.context(conn, clock.local_day(now, tz))
+
+
+def render_calendar(conn: psycopg.Connection, now: datetime, tz: ZoneInfo) -> str:
+    """CALR-05: the week ahead as the feed published it, never as fact.
+
+    Every line of this block is hedged on purpose. Google serves secret iCal
+    feeds from a cache, so a commitment added an hour ago is invisible, and a
+    coach that reads an empty calendar as a free evening will confidently plan
+    into a meeting. The block says what was published and asks for confirmation
+    rather than asserting availability.
+    """
+    return calmod.context(conn, clock.local_day(now, tz), tz)
 
 
 def render_interruption(claimed: Any | None) -> str:
@@ -118,6 +169,7 @@ def assemble(
     episodic: str = "",
     block_detail: str = "",
     counter: Any = None,
+    tz: ZoneInfo | None = None,
 ) -> ctxmod.AssembledContext:
     """Build the turn's system prompt within the MEM-11 budget.
 
@@ -130,6 +182,9 @@ def assemble(
         "persona": persona.load(),
         "constraints": render_constraints(conn),
         "facts": render_facts(conn),
+        "body_mass": render_body_mass(conn, now, tz or clock.configured_tz()),
+        "recovery": render_recovery(conn, now, tz or clock.configured_tz()),
+        "calendar": render_calendar(conn, now, tz or clock.configured_tz()),
         "block_detail": block_detail,
         "continuity_note": render_continuity(conn),
         "staleness": render_staleness(conn, now),

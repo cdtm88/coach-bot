@@ -12,12 +12,23 @@ timezone of Asia/Tokyo still belongs to the athlete's local day.
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 # The training week starts Monday, which is what makes the Sunday review the
 # close of a week rather than the middle of one.
 WEEK_STARTS_ON = 0
+
+
+def configured_tz() -> ZoneInfo:
+    """The athlete's zone: TZ-01's single source, read from the environment.
+
+    Here rather than in whichever module needed it first, because TZ-03 turns on
+    every caller agreeing on one answer. Two modules each reading their own
+    environment variable is how a training week starts drifting.
+    """
+    return ZoneInfo(os.environ.get("COACH_TZ", "UTC"))
 
 
 def to_utc(moment: datetime) -> datetime:

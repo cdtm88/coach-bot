@@ -3,7 +3,7 @@
 > Read this first in a new session. It says what is done, what is next, and what
 > the environment does that will otherwise waste your time.
 >
-> Last updated 28 July 2026, at `main` after PR #8.
+> Last updated 28 July 2026, at `main` after PR #9 and the P04 branch.
 
 ## What is merged
 
@@ -16,11 +16,20 @@
 | — | Persona seed from the source transcript (open item 9) | merged |
 | — | Seven ingest defect fixes found by reviewing against the live API (PR #7) | merged |
 | — | Poll-based ingest; the webhook dependency is gone (PR #8) | merged |
+| — | Handover doc and the three scripted live checks (PR #9) | merged |
+| P04 | Macros from MacroLog, body mass from wellness (HLTH-01 to HLTH-16) | built |
+| P05 | Recovery from wellness (RECOV-01 to RECOV-06) | built |
+| P06 | Calendar feeds (CALR-01 to CALR-06, PLAN-08) | built |
 
-256 tests, all against a real Postgres. Schema is at migration 006.
+405 tests, all against a real Postgres. Schema is at migration 009.
 
-**Next phase is P04** (macros from MacroLog, body mass from wellness). It is
-blocked only on V3a below, which takes about a minute with a key.
+**M2 is complete.** Next is **P07** — four week training blocks with cycling and
+gym prescriptions (BLOCK-01 to BLOCK-08, GYM-01 to GYM-08, SAFE-04), the first
+phase of M3 and the first that writes rather than reads.
+
+P06's soak gate needs the athlete to paste his secret iCal addresses into
+`CALENDAR_ICS_URLS`. Until then the loop runs and finds nothing, which is the
+same shape as the body mass pipeline: built, tested, waiting for its source.
 
 ## How ingest actually works now
 
@@ -41,41 +50,134 @@ you read them carelessly. Three paths, no webhook:
 `coach-ingest` runs all three plus the slow sweep
 (`COACH_SWEEP_INTERVAL_S`, default 6h) that ages out missed sessions.
 
-## What the API key unblocks
+## How body mass works, and why it looks over-built for an empty table
 
-The key is the only thing standing between here and P04. Three checks, all
-scripted — do not rewrite them:
+The HLTH requirements are mostly not about storage. They are about what the coach
+is allowed to *say*: a direction needs three readings, a rate needs six across
+three weeks and must be quoted as a range, a plateau needs a reading in each of
+four weeks, and one reading moving is never worth a sentence. A model handed a
+list of readings will honour none of that, because the arithmetic is trivial and
+the restraint is not.
 
-```bash
-uv run python scripts/verify_intervals.py all    # V2 and V3a, both read only
-```
+So the readings never enter the prompt. What enters is a slope and a range fitted
+in SQL (`coach.health.trend`), plus an explicit list of which claims the current
+evidence supports. HLTH-09 then costs nothing to obey — there is no pair of
+readings in the context to compare. If you change one thing here, do not change
+that.
 
-### V3a — wellness read. Resolves open items 1 and 3. **Do this first.**
+Three consequences worth knowing before you touch it:
 
-Reads the last 21 days and prints a table plus a verdict. It answers:
+* **The fit is weighted least squares in one SQL statement**, not a moving
+  average. The series is irregular by design (HLTH-05 sets a rate, not a
+  schedule), and a moving average over an irregular series silently overweights
+  whichever week had four readings.
+* **Every threshold lives in `coach.health.trend`** and nowhere else, because the
+  PRD says no requirement outside its table may state its own bar. A test scans
+  `src/` for reading-count comparisons elsewhere and fails on one.
+* **Body mass is excluded from the generic stale feed block** (HLTH-15), so the
+  body mass block is the only thing in the prompt that can say the feed is
+  silent. That is why it renders even at zero readings: with both absent,
+  silence reads as a stable weight.
 
-* **Open item 1**: does `weight` move day to day, or repeat? If it repeats it is
-  a static profile field, which is actively harmful — the coach would anchor on a
-  stale number and never notice. If it moves, something already feeds it.
-* **Open item 2** falls out of that: HealthBridge is needed only if weight is
-  static or absent.
-* **Open item 3**: which of the six RECOV-02 fields the Whoop link actually
-  populates. Any field that is always null is dropped from the deviation per
-  RECOV-02, which is expected behaviour rather than a bug.
+Macros are the simpler half. MacroLog posts per meal to `/macrolog/meals` with a
+shared secret in an `X-Coach-Secret` header — a different secret from the
+intervals.icu webhook, deliberately. Meals are stored per meal, never as daily
+totals; the daily total is a query.
 
-**P04 cannot be designed properly until this is run.** It is one read.
+## How recovery works
 
-### V2 — file encoding. Read only, blocks nothing.
+Same shape, one rule doing the work. RECOV-04 says the deviation is computed
+"against the athlete's own 28 day baseline, **not against platform derived
+scores**", and the second half is the one that is easy to lose. `readiness` is
+Whoop's recovery percentage arriving through intervals.icu, and a composite that
+included it would be a rebadged Whoop score wearing the word "local".
 
-Fetches one activity file and reports the first two bytes and the
-`Content-Type` / `Content-Encoding` headers. Settles whether the gzip is
-transport encoding (httpx strips it) or payload (httpx does not). The sniff in
-`parse.decompressed` is correct under both, so this only tells us which failure
-the tests should simulate.
+So the deviation is built from measured signals only — HRV, resting HR, sleep
+duration, respiration, SpO2 — each standardised against the athlete's own
+trailing 28 days of that same field and oriented so positive means better than
+his baseline. `readiness` is stored and shown to the coach beside the local
+figure, labelled as the platform's opinion, with nowhere to enter the arithmetic
+from. That is the FIT-03 rule applied to wellness.
 
-It also prints the **rate limit headroom**, which decides whether
-`COACH_POLL_INTERVAL_S=120` is sane. At 120s the poll costs about 720 calls a
-day. Nobody has seen the real numbers yet.
+Two behaviours that look like edge cases and are not. A field the feed withholds
+is dropped rather than defaulted, which is how `hrvSDNN` needs no special
+handling at all. And a baseline with no variance produces no deviation rather
+than a division — worth knowing, because a fixture with identical values every
+day will silently test the refusal path instead of the one you meant.
+
+## How the calendar read works
+
+Three things about it are worth knowing before changing anything.
+
+**Recurrence is parsed, not approximated.** A weekly commitment arrives as one
+VEVENT with an RRULE, plus EXDATEs for the weeks it was cancelled and
+RECURRENCE-ID overrides for the weeks it moved. `icalendar` and
+`recurring-ical-events` do that expansion; a hand-rolled loop would miss the
+athlete's standing Tuesday, which is worse than having no calendar at all.
+
+**The window looks backwards as well as forwards.** CALR-02 says a rolling 21 day
+horizon and is written from the scheduler's point of view, but CALR-03 derives
+*observed* availability from busy blocks, and that is a claim about weeks that
+have already happened. So the fetch covers 28 days back as well, and the delete
+that propagates a cancellation is bounded by that window — an unbounded delete
+would take CALR-03's evidence with it every six hours.
+
+**The feed's identity is the URL fingerprint, not its name.** A failed fetch has
+no document to read `X-WR-CALNAME` from and falls back to a positional label; the
+next success names it "Work". Keyed on the name those are two feeds and the second
+collides. Keyed on the fingerprint it is one feed that has learned its name.
+
+CALR-06 is stricter here than it looks. The secret URL is never written to the
+database at all — a secret in a column is a secret in the nightly pg_dump — and
+`httpx` logs the request URL at INFO on every call, so a redacting filter is
+installed on that library's logger. Being careful in our own log lines would not
+have been enough.
+
+## What the live checks found
+
+V2 and V3a were run on 28 July 2026, and a fuller field census followed while
+building P05. Full results are in `docs/intervals-api.md`; the ones that change
+what gets built:
+
+**There is no weight in the wellness feed.** Not stale, not repeated — absent, on
+all 22 days read. So HealthBridge is required (open item 2, resolved), it is the
+athlete's to build, and until it exists the body mass half of P04 has a working
+pipeline with nothing in it. That is by design rather than by accident: every
+threshold is tested on seeded data and the empty series is asserted first, so the
+first real reading starts a trend with no code change. It does mean **P04's
+validation gate cannot start yet**, which is tracked and does not block P05.
+
+**`hrvSDNN` never arrives** while the other six RECOV-02 fields do (13 of 22
+days). RECOV-02 drops it from the deviation, which is the requirement working
+rather than a bug. Open item 3, resolved.
+
+**`tempWeight` is populated on every day and must never be used.** This is the
+trap this project came closest to walking into, because it is the obvious fix for
+the weight trend being empty. Across 22 days it carried two distinct values one
+kilogram apart, alternating between them — a carried-forward stand-in the
+platform keeps so power-to-weight arithmetic has a number, not a measurement
+series. `tempRestingHR` behaves the same way. Fitting HLTH-06's trend on it would
+draw a confident line through two numbers and present it as data. Both are named
+in `wellness.NEVER_STORED` with a test.
+
+**`atlLoad` is a real load signal**, populated on all 22 days and zero on eight
+of them. That is what makes RECOV-06's cross check a distinction rather than a
+hypothetical: load recorded with no local activity means the upload is missing,
+not the session.
+
+Two smaller things worth not rediscovering. The activity file arrives with
+`Content-Encoding: gzip` already stripped by httpx, so the bytes are plain FIT on
+arrival — the sniff handles it either way. And **no rate limit headers are
+returned at all**, so the 120 second poll interval stands on arithmetic rather
+than measurement.
+
+### V3b — the wellness write. **Probably do not run this.**
+
+The premise is gone. It tests whether a connected provider resyncs over an API
+written weight, and this account has no provider writing weight. Unlocking a day
+has no documented API path, so running the locked half is a one way door opened
+to answer a question the account no longer poses. Let HealthBridge write without
+`locked`, and revisit only if a value is ever seen to revert.
 
 ### V1 — external_id scoping. Writes, self-cleaning. Blocks P08 only.
 
@@ -90,27 +192,13 @@ PLAN-05's orphan sweep must use an `external_id` prefix convention instead.
 
 Not urgent. P08 is a long way off.
 
-### V3b — the wellness write. **Ask before running this.**
-
-```bash
-uv run python scripts/verify_intervals.py v3 --write --date 2026-06-01 --lock
-```
-
-Tests whether a provider resync overwrites an API-written weight and whether
-`locked: true` prevents it. This decides how MacroLog writes body mass.
-
-**There is no documented API path to unlock a day afterwards.** The script
-refuses to run without an explicit `--date` for that reason. Pick a day that does
-not matter, and get the athlete's agreement first. The read half (V3a) is
-risk-free and answers open item 1 on its own.
-
 ## Open items
 
 | # | Item | Blocks | State |
 | --- | --- | --- | --- |
-| 1 | Where does the weight in intervals.icu come from? | P04 | **run V3a** |
-| 2 | Who builds HealthBridge, is it needed? | P04 | falls out of item 1 |
-| 3 | Which wellness fields does the Whoop link populate? | P05 | **run V3a** |
+| 1 | Where does the weight in intervals.icu come from? | — | resolved: nowhere, the field is absent |
+| 2 | Who builds HealthBridge, is it needed? | P04 validation | resolved: yes, needed, and it is the athlete's |
+| 3 | Which wellness fields does the Whoop link populate? | — | resolved: six of seven, `hrvSDNN` never |
 | 4 | Verify no activity gaps after the Strava disconnect | — | needs a key; low urgency now that the poll covers Strava-sourced rides |
 | 5 | Manual activity endpoint | — | resolved |
 | 6 | Transcription | P01 polish | open, needs a decision |
@@ -153,8 +241,18 @@ anywhere.
 
 **Correct the documents rather than working around them.** When a requirement no
 longer describes the system, amend it and say so in the change — FIT-01 was
-amended when polling replaced the webhook rather than left quietly false. SPEC-02
-requires fixing the losing document in the same change.
+amended when polling replaced the webhook rather than left quietly false, and the
+plateau row of the weight trend table was amended in P04 when it turned out to
+state a span that a 28 day window makes unreachable. SPEC-02 requires fixing the
+losing document in the same change.
+
+**A rule that can never fire is not a strict rule, it is a broken one.** The
+plateau threshold above read as conservative and was in fact dead: no plateau
+could ever have been called and no programme change on weight evidence proposed.
+It survived a PRD review because "weekly coverage over 4 weeks" is obviously
+right until you notice a 28 day window holds 28 dates and therefore spans 27
+days. Worth checking any threshold you write against the window it is measured
+in.
 
 **External review is evidence, not instruction.** An integration specification
 reviewed on 28 July reported seven defects; six were real and one was wrong,
@@ -172,6 +270,9 @@ docs/intervals-api.md    what the API actually does, verified, with dates
 docs/prd-review.md       the v2.1 review and what it changed
 scripts/verify_intervals.py   the three checks above
 scripts/dev-db.sh        throwaway Postgres for the suite
+
+src/coach/health/       P04 and P05: macros, body mass, recovery
+src/coach/calendars/    P06: the iCal feeds and observed availability
 ```
 
 On conflict: the design wins on schema and memory semantics, the PRD wins on

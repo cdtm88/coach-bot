@@ -36,7 +36,7 @@ DEFAULT_SWEEP_INTERVAL_S = 6 * 3600
 INTERVAL_HOURS = 6
 
 
-def _interval(name: str, default: int, floor: int) -> int:
+def env_interval(name: str, default: int, floor: int) -> int:
     """Read an interval from the environment, refusing values that would hurt.
 
     A floor rather than a free number: polling every second would exhaust the
@@ -59,12 +59,12 @@ def _interval(name: str, default: int, floor: int) -> int:
 
 def poll_interval_s() -> int:
     """COACH_POLL_INTERVAL_S. Floored at 30s to stay clear of the rate limit."""
-    return _interval("COACH_POLL_INTERVAL_S", DEFAULT_POLL_INTERVAL_S, 30)
+    return env_interval("COACH_POLL_INTERVAL_S", DEFAULT_POLL_INTERVAL_S, 30)
 
 
 def sweep_interval_s() -> int:
     """COACH_SWEEP_INTERVAL_S. Floored at 5 minutes; it has nothing to do faster."""
-    return _interval("COACH_SWEEP_INTERVAL_S", DEFAULT_SWEEP_INTERVAL_S, 300)
+    return env_interval("COACH_SWEEP_INTERVAL_S", DEFAULT_SWEEP_INTERVAL_S, 300)
 
 
 @dataclass

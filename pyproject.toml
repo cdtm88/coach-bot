@@ -10,6 +10,14 @@ dependencies = [
     # FIT-03 parses the original file rather than reading a derived aggregate,
     # so a FIT decoder is a runtime dependency and not a test convenience.
     "fitdecode>=0.10",
+    # CALR-01 reads Google's secret iCal feeds, and CALR-03 depends on those
+    # feeds being expanded correctly rather than approximately: a weekly
+    # commitment is one VEVENT with an RRULE plus EXDATEs for the weeks it was
+    # cancelled and RECURRENCE-ID overrides for the weeks it moved. Hand-rolling
+    # that would miss the athlete's standing commitment, which is worse than
+    # having no calendar at all.
+    "icalendar>=6.0",
+    "recurring-ical-events>=3.2",
 ]
 
 [project.optional-dependencies]

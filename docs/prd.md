@@ -158,8 +158,19 @@ Single user. Cycling primary, gym programmed against movement constraints, gym a
 | Report an individual reading | 1 | none | HLTH-07 |
 | Any statement of direction | 3 | none | HLTH-07 |
 | A rate of loss, always as a range | 6 | 3 weeks | HLTH-08 |
-| Plateau or stall, and any programme change on weight evidence alone | weekly coverage | 4 weeks | HLTH-16 |
-| The trend arbitrates against an energy balance estimate | weekly coverage | 4 weeks | NUT-04 |
+| Plateau or stall, and any programme change on weight evidence alone | a reading in each of the four weeks of the HLTH-06 window | that window | HLTH-16 |
+| The trend arbitrates against an energy balance estimate | a reading in each of the four weeks of the HLTH-06 window | that window | NUT-04 |
+
+**Amended 28 July 2026.** The last two rows read "weekly coverage" over a
+"4 weeks" span, and stated that way they could never be satisfied. HLTH-06 fixes
+the fit at a 28 day window, which is 28 distinct dates and therefore a maximum
+first-to-last span of 27 days, so a separate 28 day span bar was unreachable by
+construction: a plateau could never have been called and no programme change on
+weight evidence could ever have been proposed. The two conditions were always one
+condition — a reading in each of the window's four weeks *is* four weeks of
+readings — and the table now says so. The bar is unchanged in intent and is now
+reachable. Found while implementing P04; `coach.health.trend` carries the same
+note.
 
 ### Wellness feed
 
@@ -370,9 +381,9 @@ Completion is split in two. **Implemented when** is a test gate: it passes on se
 | Phase | Goal | Requirements | Implemented when | Validated when |
 | --- | --- | --- | --- | --- |
 | P03 | Ingest activities from intervals.icu and produce session reviews against prescriptions. | FIT-01 to FIT-17, SEC-02 | Full history backfills silently, a new ride reviews inside the PERF-03 budget, replayed and unsigned webhooks rejected, reconcile restores a deleted session, a locally dropped file ingests without upstream involvement, a coach authored activity returns without duplicating. | n/a |
-| P04 | Accept macros from MacroLog and read body mass from wellness, with no third party export app. | HLTH-01 to HLTH-16 | Per-meal macros land from MacroLog, seeded readings at irregular spacing fit a trend, and every row of the weight trend threshold table is enforced against seeded data. | Real readings arrive near the target rate and the coach makes no directional claim before three points exist. |
-| P05 | Read recovery from intervals.icu wellness. | RECOV-01 to RECOV-06 | Every wellness field the feed carries lands each morning with no OAuth client anywhere in the codebase, and a withheld field degrades the deviation without failing ingest. | n/a |
-| P06 | Read calendar feeds so the coach knows the shape of the week including golf and commitments. | CALR-01 to CALR-06 | Seeded busy blocks produce observed availability facts through consolidation, declined events are excluded, and no log line contains a feed URL. | Observed availability facts appear after two weeks of real calendar data. |
+| P04 | Accept macros from MacroLog and read body mass from wellness, with no third party export app. | HLTH-01 to HLTH-16 | Per-meal macros land from MacroLog, seeded readings at irregular spacing fit a trend, and every row of the weight trend threshold table is enforced against seeded data. | Real readings arrive near the target rate and the coach makes no directional claim before three points exist. **Blocked on HealthBridge** (open item 2): the wellness feed carries no weight, so no real reading can arrive until MacroLog writes one. The implementation gate is unaffected and was met on 28 July 2026. |
+| P05 | Read recovery from intervals.icu wellness. | RECOV-01 to RECOV-06 | Every wellness field the feed carries lands each morning with no OAuth client anywhere in the codebase, and a withheld field degrades the deviation without failing ingest. | n/a. RECOV-01, RECOV-02 and RECOV-05 landed with P04 — body mass and recovery are the same read. RECOV-03, RECOV-04 and RECOV-06 followed on the same branch. The deviation is standardised against the athlete's own trailing 28 days of each measured signal and takes no input from `readiness`, which is the platform's own score and is stored beside it instead. |
+| P06 | Read calendar feeds so the coach knows the shape of the week including golf and commitments. | CALR-01 to CALR-06 | Seeded busy blocks produce observed availability facts through consolidation, declined events are excluded, and no log line contains a feed URL. | Observed availability facts appear after two weeks of real calendar data. Needs the athlete to paste his secret iCal addresses into `CALENDAR_ICS_URLS`; nothing else blocks it. |
 
 ### M3 Coaching
 
@@ -396,9 +407,9 @@ This is the only open items register. `docs/memory-design.md` section 14 points 
 
 | # | Item | Blocks | Note |
 | --- | --- | --- | --- |
-| 1 | **Where is the weight in intervals.icu coming from?** Read wellness across the last two weeks. If the value is identical on every date it is a static profile field copied from upstream, which is actively harmful because the coach would anchor on a stale number and never notice. If it moves day to day, something already feeds it correctly. | P04 | Resolves item 2 with it. |
-| 2 | **Who builds HealthBridge, and is it needed?** It is a module inside MacroLog, not this repository, and no requirement here covers it. If item 1 resolves toward building it, it is a prerequisite of P04 and belongs on the athlete's side of the setup guide's division of labour. If weight already moves day to day, it is dropped entirely. | P04 | Out of scope for this repo either way. |
-| 3 | **Does the athlete's wellness feed populate all six RECOV-02 fields?** The API schema carries all six plus `weight`, verified 27 July 2026 (`docs/intervals-api.md`), so the remaining question is only what his Whoop link actually fills in. Needs one authenticated range read. Any field left null is dropped from the deviation calculation per RECOV-02; a direct Whoop integration is not an available remedy. | P05 | RECOV-03 and SEC-04 bind. |
+| 1 | **Resolved. Where is the weight in intervals.icu coming from?** Nowhere. A 21 day wellness read on 28 July 2026 returned 22 rows, 13 of them populated, and `weight` null on every one. The question assumed it either moved or repeated; it does neither. **But `tempWeight` is populated on every day**, carrying two distinct values a kilogram apart and alternating between them — a carried-forward stand-in, not a measurement series. That is the harmful case this item was written to catch, arriving under a field name it did not anticipate, and it must never be wired into HLTH-04. | — | Verified 28 July 2026, `docs/intervals-api.md`. |
+| 2 | **Resolved: HealthBridge is required.** Item 1 resolved toward building it. Body mass has no source until MacroLog writes it to intervals.icu wellness, so it is a prerequisite of P04's *validation* gate and belongs on the athlete's side of the setup guide's division of labour. It is not a prerequisite of P04's implementation gate, which is seeded data by design, and P04 is built and merged without it. Still out of scope for this repository. | P04 validation | The read side is built and idle: the moment a weight lands in wellness it becomes a reading and the trend starts. |
+| 3 | **Resolved. Does the wellness feed populate all six RECOV-02 fields?** Six of seven arrive: `sleepSecs`, `sleepScore`, `restingHR`, `hrv`, `readiness`, `respiration`, `spO2` on 13 of 22 days. `hrvSDNN` is null on all 22 and is dropped from the RECOV-04 deviation, which is the behaviour RECOV-02 provides for rather than a defect. | — | Verified 28 July 2026. RECOV-03 and SEC-04 still bind: a direct Whoop integration is not a remedy. |
 | 4 | **Verify no activity gaps after the Strava disconnect.** Compare the current activity list against the pre-disconnect snapshot and backfill anything missing from the local FIT archive through the upload endpoint. | P03 | |
 | 5 | **Resolved. Manual activity endpoint** exists and takes JSON: `POST /api/v1/athlete/{id}/activities/manual`. LOG-07 simplified and the TCX fallback dropped. | — | Verified 27 July 2026 against the live spec. |
 | 6 | **Transcription:** hosted API or local model on the homelab. Latency against privacy and running cost. | P11 | |

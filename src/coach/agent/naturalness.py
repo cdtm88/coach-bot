@@ -1,10 +1,12 @@
 """Naturalness checks.
 
 CHAT-03 (never narrate a memory operation), CHAT-04 (at most one question per
-message) and CHAT-10 (plain conversational text, median under 120 words) are
-behavioural requirements, so the real test is the regression suite in
-:mod:`tests`. These functions are what that suite asserts with, and what the
-turn loop uses to catch a violation before it reaches the athlete.
+message), CHAT-10 (plain conversational text, median under 120 words), SAFE-05
+(observe, never diagnose) and HLTH-09 (never react to one body mass reading,
+never compare two) are behavioural requirements, so the real test is the
+regression suite in :mod:`tests`. These functions are what that suite asserts
+with, and what the turn loop uses to catch a violation before it reaches the
+athlete.
 
 Both checks count meaning rather than punctuation. v2.1 rewrote CHAT-04's
 acceptance for exactly this reason: "no two question marks" passes for two
@@ -123,6 +125,62 @@ def refers_clinically(text: str) -> bool:
     return bool(CLINICAL_REFERRAL.search(text))
 
 
+# HLTH-09. The coach never comments on a single reading moving up, and never
+# compares two individual readings.
+#
+# This is a backstop, not the mechanism. The mechanism is that the readings are
+# not in the context at all — :func:`coach.agent.prompt.render_body_mass` puts a
+# fitted slope and a set of permissions there instead, so there is nothing to
+# compare. What is caught here is the case where the athlete quotes his own two
+# numbers in a message and the coach repeats them back as a comparison.
+
+# An absolute body mass figure. A rate is not one, so rates are removed before
+# counting: "between 0.30 and 0.45 kg per week" is exactly what HLTH-08 asks for
+# and must not read as two readings.
+_WEIGHT_FIGURE = re.compile(r"\d{1,3}(?:\.\d+)?\s*(?:kg|kilos?|kilograms?)\b", re.IGNORECASE)
+_RATE_FIGURE = re.compile(
+    r"\d{1,3}(?:\.\d+)?\s*(?:kg|kilos?|kilograms?)?\s*(?:per|a|/)\s*(?:week|wk|month|fortnight)",
+    re.IGNORECASE,
+)
+
+_WEIGHT_SUBJECT = re.compile(
+    r"\b(weight|weigh(?:ed|s|ing)?|weigh[-\s]?in|scales?|kg|kilos?|body\s*mass)\b",
+    re.IGNORECASE,
+)
+_MOVEMENT = re.compile(
+    r"\b(up|down|gained|lost|heavier|lighter|jumped|spiked|dropped|climbed)\b",
+    re.IGNORECASE,
+)
+# A single occasion, as opposed to a window. "over the last month" is a trend and
+# is allowed; "this morning" is one reading and is not.
+_SINGLE_OCCASION = re.compile(
+    r"\b(today|this\s+morning|yesterday|last\s+night|that\s+reading|this\s+(?:one|reading)|"
+    r"since\s+yesterday|since\s+(?:your\s+)?last\s+(?:reading|weigh[-\s]?in))\b",
+    re.IGNORECASE,
+)
+
+
+def compares_individual_readings(text: str) -> bool:
+    """HLTH-09: two body mass figures set against each other in one sentence."""
+    for sentence in _sentences(text):
+        cleaned = _RATE_FIGURE.sub(" ", sentence)
+        if len(_WEIGHT_FIGURE.findall(cleaned)) >= 2:
+            return True
+    return False
+
+
+def reacts_to_single_reading(text: str) -> bool:
+    """HLTH-09: a claim about weight moving, pinned to one occasion."""
+    for sentence in _sentences(text):
+        if (
+            _WEIGHT_SUBJECT.search(sentence)
+            and _MOVEMENT.search(sentence)
+            and _SINGLE_OCCASION.search(sentence)
+        ):
+            return True
+    return False
+
+
 def word_count(text: str) -> int:
     return len(text.split())
 
@@ -148,4 +206,8 @@ def violations(text: str) -> list[str]:
         found.append("CHAT-10: contains headers or bullets")
     if diagnoses(text):
         found.append("SAFE-05: names a condition rather than observing one")
+    if compares_individual_readings(text):
+        found.append("HLTH-09: compares two individual body mass readings")
+    if reacts_to_single_reading(text):
+        found.append("HLTH-09: comments on a single body mass reading moving")
     return found

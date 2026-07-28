@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 import psycopg
 
 from coach import clock
+from coach.health import recovery as recoverymod
 from coach.ingest.activities import uses_power_analysis
 from coach.memory import notes as notemod
 
@@ -169,12 +170,22 @@ def review(
 
 
 def missed(conn: psycopg.Connection, now: datetime, tz: ZoneInfo) -> list[dict[str, Any]]:
-    """Prescriptions old enough to call missed (FIT-12).
+    """Prescriptions old enough to call missed (FIT-12, RECOV-06).
 
-    Two gates. The grace window covers the overnight upload, and the load cross
-    check covers the ride that happened with a broken sync: a session on the day
-    with no prescription attached is evidence the athlete trained, so the
-    prescription is unmatched rather than skipped.
+    Three gates now, and the third is RECOV-06. The grace window covers the
+    overnight upload. A session on the day with no prescription attached is
+    evidence the athlete trained, so the prescription is unmatched rather than
+    skipped. And **training load recorded upstream with no local activity means
+    the upload is missing, not the session** — that is the exact case RECOV-06
+    names, and without it a broken watcher reads as a fortnight of skipped
+    sessions.
+
+    The verdict carries its signals rather than only its conclusion. P09's ADJ-08
+    forbids restructuring on a missing activity before the recovery and load
+    signal has been checked, and it needs to know not just what was decided but
+    what was known — `safe_to_act` is false when the feed had nothing for the
+    day, because an absent wellness row is the coach not knowing rather than a
+    recorded zero.
     """
     cutoff = now - timedelta(hours=GRACE_HOURS)
     with conn.cursor() as cur:
@@ -200,17 +211,45 @@ def missed(conn: psycopg.Connection, now: datetime, tz: ZoneInfo) -> list[dict[s
                 (day,),
             )
             same_day = cur.fetchone()["n"]
+
+        # RECOV-06: check the load signal before drawing a conclusion, not after.
+        load_recorded = recoverymod.load_recorded_on(conn, day)
+        deviation = recoverymod.for_day(conn, day)
+
+        if same_day:
+            is_missed = False
+            reason = f"{same_day} session(s) on the day; unmatched rather than missed"
+        elif load_recorded:
+            is_missed = False
+            reason = "load recorded upstream with no local activity; the upload is missing"
+        elif load_recorded is None:
+            is_missed = True
+            reason = "no activity, and the wellness feed had nothing for the day"
+        else:
+            is_missed = True
+            reason = "no activity and no load recorded on the day"
+
         verdicts.append(
             {
                 "prescription_id": candidate["id"],
                 "planned_for": candidate["planned_for"],
                 "local_date": day,
-                "missed": same_day == 0,
-                "reason": (
-                    "no activity of any kind on the day"
-                    if same_day == 0
-                    else f"{same_day} session(s) on the day; unmatched rather than missed"
-                ),
+                "missed": is_missed,
+                "reason": reason,
+                # What was known when the verdict was reached. ADJ-08 reads this.
+                "signals": {
+                    "sessions_on_day": same_day,
+                    "load_recorded": load_recorded,
+                    "recovery_deviation": (
+                        float(deviation.deviation)
+                        if deviation is not None and deviation.usable
+                        else None
+                    ),
+                },
+                # ADJ-08: "With wellness unavailable, the system asks rather than
+                # acts." Marking a prescription missed is bookkeeping and happens
+                # anyway; restructuring the week off it is an action and does not.
+                "safe_to_act": load_recorded is not None,
             }
         )
     return verdicts

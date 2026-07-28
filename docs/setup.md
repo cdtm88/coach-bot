@@ -121,7 +121,9 @@ Roughly 10 minutes
 
 * No Google Cloud project, no consent screen, no OAuth. In Google Calendar settings, open each calendar you want the coach to see and copy the secret address in iCal format.
 * Include anything that shapes your week: work, personal, golf, travel.
-* Paste the URLs into .env as a comma separated list. Treat them as passwords, because anyone holding one can read that calendar.
+* Paste the URLs into `CALENDAR_ICS_URLS` in .env as a comma separated list. Treat them as passwords, because anyone holding one can read that calendar. The coach never writes them to the database and never logs them — including through `httpx`, which logs the request URL on every call and has a redacting filter installed on it for exactly that reason.
+* The coach reads them every six hours (`COACH_CALENDAR_INTERVAL_S`), covering four weeks back and three forward. Backwards because observed availability is a claim about weeks that have happened; forwards because that is what scheduling needs.
+* Mark anything you want the coach to ignore as "free" rather than deleting it. A birthday reminder marked busy costs you an evening a week.
 * Note the trade: Google publishes these feeds on a cache, so a commitment added an hour ago may not appear immediately. Acceptable here because the coach only reads them and the weekly review confirms the week ahead, which is what CALR-05 encodes. Swapping to OAuth is not the escape hatch if the lag bites — SEC-04 forbids OAuth anywhere in the system, and PLAN-04 is scoped to what the feed showed at scheduling time precisely so the lag is survivable.
 
 ### Step 8: MacroLog wiring
@@ -130,9 +132,11 @@ Roughly 10 minutes
 
 * No third party export app and no subscription. Apple Health data reaches the system through the HealthBridge module inside MacroLog.
 * Put the intervals.icu API key into MacroLog's gitignored config file alongside the Anthropic key. The same key goes in the coach environment, so it lives in two places.
-* Point MacroLog's macro writes at the coach ingest endpoint on your tunnel hostname, with the shared secret as a header.
-* Before building HealthBridge, read wellness for the last fortnight and check whether weight already varies day to day. If it does, something is already feeding it and the module is unnecessary. This is open item 1 in the PRD and it blocks P04.
-* HealthBridge is yours, not Claude Code's. It is a module inside MacroLog rather than this repository, so no requirement covers it and nothing in the phase plan builds it. If item 1 resolves toward building it, treat it as a prerequisite of P04.
+* Point MacroLog's macro writes at `POST https://<your tunnel host>/macrolog/meals`, with `MACRO_INGEST_SECRET` in an `X-Coach-Secret` header. Use a different value from `INTERVALS_WEBHOOK_SECRET`: one leaking must not open the other route.
+* The payload is `{"meals": [ ... ], "deleted": [ ... ]}`, both halves optional, or a bare meal object for the simplest client. Each meal needs an `id` (yours, and the idempotency key) and an `eaten_at` carrying an offset — a naive timestamp is refused rather than guessed at, because the ambiguity is a whole day at the boundary. `kcal`, `protein_g`, `carbs_g`, `fat_g` and `fibre_g` are read; anything else you send is kept whole and not lost. Replaying a payload updates in place, and an id in `deleted` removes the row.
+* **Build HealthBridge.** The check that would have made it unnecessary was run on 28 July 2026: wellness carries no `weight` on any day, so nothing feeds body mass and the coach has a working trend pipeline with nothing in it. Open items 1 and 2 in the PRD are closed on that basis.
+* HealthBridge is yours, not Claude Code's. It is a module inside MacroLog rather than this repository, so no requirement covers it and nothing in the phase plan builds it. Treat it as a prerequisite of P04's validation gate; P04 itself is built and merged without it.
+* Write `weight` to `PUT /api/v1/athlete/0/wellness/{date}` **without** `"locked": true`. The locked flag exists to stop a connected provider resyncing over an API written value, but no provider writes weight on this account and there is no documented way to unlock a day afterwards. Watch for a value reverting; if one ever does, that is the finding and the locked variant can be tested on a day that does not matter.
 
 ### Step 9: Backfill
 
@@ -203,7 +207,7 @@ If the process is killed mid-ride, queued deliveries survive in the database and
 #### Daily, automatic
 
 * Zwift rides arrive through the watched folder within seconds of the file syncing. Everything else arrives on the poll, by default within two minutes. A session review follows either way, inside the five minute budget.
-* MacroLog posts macros as you log meals and body mass to intervals.icu; wellness is read each morning and reconciled every six hours.
+* MacroLog posts macros as you log meals, and body mass to intervals.icu wellness; the coach reads wellness back hourly (`COACH_WELLNESS_INTERVAL_S`) and re-reading is free, so a late provider fill-in is picked up regardless.
 * Calendar feeds fetch every six hours; planned sessions publish to intervals.icu on block change.
 * Consolidation runs at 03:00, then the recall suite and linter.
 
@@ -226,6 +230,7 @@ Symptoms and first checks
 | Coach stops replying | Long polling process died, or the API key hit a limit | Container status, then cost log |
 | Recovery data stops | Whoop to intervals.icu link dropped, or the API key was rotated | Wellness endpoint directly with curl, then the platform connection page |
 | Weight trend goes flat | HealthKit read permission revoked, which returns empty rather than an error | MacroLog HealthBridge queue, then the 12 day heartbeat should already have raised it |
+| Coach never mentions weight at all | No reading has ever arrived, so there is no gap to raise — only a feed that has never delivered | `select count(*) from body_mass_readings`, then whether HealthBridge is writing at all |
 | Sessions missing | Webhook not delivered, not a missed session | Run reconcile, then compare against the activity list upstream |
 | Duplicate planned workouts | Coach id not written or not read on update | Planned event metadata upstream |
 | Coach ignores a commitment | iCal feed cache had not updated when it planned | Fetch the feed URL directly and compare; mention it in the weekly review |
