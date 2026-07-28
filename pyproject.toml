@@ -7,17 +7,24 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "anthropic>=0.69",
     "httpx>=0.27",
+    # FIT-03 parses the original file rather than reading a derived aggregate,
+    # so a FIT decoder is a runtime dependency and not a test convenience.
+    "fitdecode>=0.10",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    # Writes the FIT files the ingest tests parse. Tests only: nothing in the
+    # application ever writes one.
+    "fit-tool>=0.9",
 ]
 
 [project.scripts]
 coach-migrate = "coach.migrate:main"
 coach-seed = "coach.seed:main"
+coach-ingest = "coach.ingest.server:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -3,8 +3,10 @@
 .env.*
 !.env.example
 
-# Local FIT archive (FIT-15: permanent, backed up, never in git)
+# Local FIT archive (FIT-15: permanent, backed up, never in git) and the
+# watched drop folder beside it. Both default under var/.
 fit-archive/
+var/
 
 # Backups and exports (MEM-12)
 backups/
@@ -19,6 +21,7 @@ venv/
 .ruff_cache/
 .coverage
 htmlcov/
+uv.lock
 
 # Local test Postgres cluster
 .pgdata/

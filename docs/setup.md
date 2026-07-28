@@ -86,7 +86,9 @@ Roughly 5 minutes
 Roughly 15 minutes
 
 * Copy your athlete id and API key from the intervals.icu settings page into .env. Key based auth, so no OAuth flow and no token refresh to maintain.
-* Register a webhook pointing at your tunnel hostname for activity uploads, and store the signing secret.
+* Register a webhook pointing at `https://coach.yourdomain/webhook/intervals` for activity uploads, and put the secret in .env as `INTERVALS_WEBHOOK_SECRET`. Subscribe to `ACTIVITY_UPLOADED` — the receiver records the other event types but acts only on that one, because `ACTIVITY_ANALYZED` is held 60 seconds upstream and would spend a fifth of the review budget before any work started.
+* There is no signature header to configure. intervals.icu authenticates the callback by putting the secret in the body, so the receiver compares it in constant time and records every delivery to make a replayed body harmless. If the variable is unset the endpoint refuses every payload rather than accepting anything.
+* Registering the webhook requires an app, which means one browser consent against your own account. The token does not expire and there is nothing to refresh, so no client code follows from it. Re-authorising later discards the previous token: if you redo the consent, update .env.
 * Confirm both connections are live on the platform side: Zwift feeding activities, Whoop feeding wellness.
 * Check what the wellness payload actually contains for a recent day before assuming it covers everything, and record the answer against open item 3 in the PRD. If a metric is missing, it is dropped from the recovery deviation calculation per RECOV-02. Adding a direct Whoop integration is not an option: RECOV-03 forbids a Whoop client and SEC-04 forbids OAuth anywhere in the system.
 * Confirm the Zwift connection in intervals.icu settings is the two way integration, not just activity import. With it connected, planned workouts push to Zwift directly and no workout files ever need moving. Test it with one workout before the coach depends on it.
@@ -152,11 +154,21 @@ INTERVALS_WEBHOOK_SECRET=
 CALENDAR_ICS_URLS=
 DAILY_SPEND_CAP_USD=3.00
 TZ=Asia/Dubai
+COACH_TZ=Asia/Dubai
+COACH_INGEST_PORT=8080
+COACH_FIT_ARCHIVE=var/fit-archive
+COACH_FIT_WATCH=var/fit-inbox
 ```
+
+The two folder paths are worth choosing deliberately. `COACH_FIT_ARCHIVE` is the permanent copy of every file the system has seen and is never pruned, which is the whole point of FIT-15 — disconnecting an upstream integration deletes that source's activities upstream, and this is what survives it. Put it on storage you back up. `COACH_FIT_WATCH` is a drop folder: anything ending in `.fit` that lands there is ingested on the next six hourly pass, with no upstream involved at all.
 
 Never commit this file. Rotate the Anthropic key and the ingest secret if it is ever pasted into a chat, a screenshot or an issue.
 
 ## 5. Running it
+
+#### Processes
+
+`coach-ingest` runs the activity side: it serves the webhook route on `COACH_INGEST_PORT` and runs the reconcile, folder scan and missed-session check every six hours in the same process. It binds to loopback only — the tunnel is what makes it reachable, so there is no reason for it to listen anywhere else. `GET /health` answers without a secret if you want something for the tunnel to probe.
 
 #### Daily, automatic
 
