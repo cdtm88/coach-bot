@@ -3,8 +3,8 @@
 > Read this first in a new session. It says what is done, what is next, and what
 > the environment does that will otherwise waste your time.
 >
-> Last updated 30 July 2026, at `main` after PR #13. Everything through P07 is
-> merged, the runtime is wired, and V1 has been run.
+> Last updated 30 July 2026, at `main` after PR #15, with P08 on a branch.
+> V1 and V4 have both been run against the live account.
 
 ## What is merged
 
@@ -24,22 +24,21 @@
 | P07 | Training blocks and gym programming (BLOCK, GYM, SAFE-04) | merged (PR #11) |
 | — | The runtime: `coach-agent`, `coach-scheduler`, OBS-07's stop (PR #12) | merged |
 | — | P02's proposer, so consolidation actually runs (CONS-02, PR #13) | merged |
+| P08 | Publishing upstream and athlete edit detection (PLAN-01 to PLAN-12) | built |
 
-528 tests, all against a real Postgres. Schema is at migration 011; the
+588 tests, all against a real Postgres. Schema is at migration 012; the
 scheduler's own ledger is created on first use rather than as a migration,
 because it is process bookkeeping rather than part of the memory design.
 
-**P00 to P07 are merged, the runtime is wired, and consolidation runs.** Next is
-**P08** — publishing prescriptions to the intervals.icu calendar and detecting
-athlete edits (PLAN-01 to PLAN-12). It is the first phase that writes *upstream*.
+**P00 to P08 are built and the runtime is wired.** P08 publishes prescriptions to
+the intervals.icu calendar, keeps them out of busy evenings, sweeps its own
+orphans nightly, and accepts the athlete's edits back into the local plan. It is
+the first phase that writes *upstream*.
 
-**V1 has been run and P08 is unblocked.** `oauth_client_id` is null under a
-personal API key, so PLAN-05's orphan sweep uses an `external_id` prefix
-convention rather than the documented application scoping. Upsert on
-`external_id` matches, and bulk-delete accepts the same field. Details and the
-one remaining unknown are in the V1 section below.
+Next is **P09** onward in `docs/prd.md` section 4. Nothing is gated on a live
+check any more: V1 and V4 are both run and recorded below.
 
-Two soak gates are waiting on the athlete and neither blocks P08: HealthBridge
+Two soak gates are waiting on the athlete and neither blocks anything: HealthBridge
 writing body mass, and the secret iCal addresses in `CALENDAR_ICS_URLS`. Both
 pipelines are built, tested and idle.
 
@@ -49,9 +48,9 @@ Three processes, all console scripts:
 
 | Process | What it does |
 | --- | --- |
-| `coach-ingest` | Every inbound feed: two HTTP routes, the activity poll, wellness, calendar, the sweep, and the webhook drain. |
+| `coach-ingest` | Every inbound feed: two HTTP routes, the activity poll, wellness, calendar, planned-calendar sync, the sweep, and the webhook drain. |
 | `coach-agent` | Telegram long poll, one turn per backlog. |
-| `coach-scheduler` | The nightly jobs on the athlete's local 03:00. |
+| `coach-scheduler` | The nightly jobs on the athlete's local 03:00: consolidation, PLAN-05's orphan sweep, decay, the fact export. |
 
 **This is new, and it closed a gap the phase table could not show.** Until 28
 July `coach-ingest` was the only one. Eight phases were merged and 458 tests
@@ -66,6 +65,49 @@ at each seam was simply nobody's phase. `src/coach/runtime/` is where it lives
 now, and it holds no opinions: every rule it applies — the interruption budget,
 the naturalness checks, the conflict matrix — already had a home, and this calls
 them in order.
+
+### P08, and the two live checks it needed
+
+V1 settled the shape: `oauth_client_id` is null under a personal API key, so there
+is no way to ask upstream which events are ours. `coach.plans.events.is_ours`
+matches an exact `external_id` pattern instead — exact and not a prefix, because
+PLAN-05 *deletes* what it claims and the athlete's own events are on the same
+calendar.
+
+**V4 caught a one-character bug that no unit test could have.** PLAN-09 publishes
+native workout text and PLAN-10 forbids the coach generating files, so the whole
+requirement rests on the platform compiling our text correctly. It does — but the
+repeat line must not carry a leading dash. `- 3x` is parsed as an unrecognised
+step and **silently dropped**: a 3x set renders once, 1260s arriving for a 1980s
+session, with no error from anywhere. `3x` renders as `<IntervalsT Repeat="3">`.
+
+The first version of V4 then scored the *fixed* output as still broken, because
+`IntervalsT` carries no `Duration` attribute — only `OnDuration`, `OffDuration`
+and `Repeat` — so summing `Duration` alone counted a correct set as a third of its
+length. Worth stating because it nearly caused a working feature to be rewritten:
+the check has to understand both encodings, and it now does.
+
+Three PLAN decisions worth knowing without reading the code:
+
+* **PLAN-04 moves within the evening, never across days.** BLOCK chose the weekday
+  against observed availability; shifting Thursday's intervals to Friday would be
+  re-planning rather than accommodation. If the evening is genuinely full the
+  session is reported unplaceable and the *rest of the block still publishes* — a
+  hole the athlete can be told about beats a block that refused to go up.
+* **The athlete's edit wins.** PLAN-12 says the two must never diverge and does not
+  say which side yields. Moving a session in the app is a decision, and the
+  alternative is the coach republishing over it every cycle. The coach's view is
+  expressed as evidence for the next block instead.
+* **PLAN-05 will not sweep the past.** A past planned event is what an activity was
+  paired against and what the athlete did or failed to do. Sweeping it would delete
+  a record to tidy a calendar nobody is looking at.
+
+**One thing P08 does not do, and it is BLOCK's rather than PLAN's.** No generator
+emits a step list. P07 produces steady sessions plus a ramp-test flag, and
+choosing a ramp protocol is a training decision. So the structured path (PLAN-09)
+is built, tested and verified live, and every session the current block content
+produces takes the unstructured path (PLAN-11) — which is correct for steady
+endurance and gym work. Wiring a generator to emit steps is a BLOCK change.
 
 ### The consolidation proposer, now written
 
@@ -428,6 +470,7 @@ src/coach/ingest/       P03: activities, the archive, reviews, the process
 src/coach/health/       P04 and P05: macros, body mass, recovery
 src/coach/calendars/    P06: the iCal feeds and observed availability
 src/coach/blocks/       P07: the constraint gate, the library, load, generation
+src/coach/plans/        P08: publishing upstream, the sweep, athlete edits
 
 The README's layout section lists every module with one line on what it is for.
 ```

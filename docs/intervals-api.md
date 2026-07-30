@@ -304,8 +304,36 @@ ways: `file_contents_base64` (zwo, fit, mrc, erg), `file_contents` for raw ZWO, 
 file generation at all, which is exactly what PLAN-10 wants when it says the
 coach produces the step list and never the file.
 
-Listing events returns everything on the calendar, not just ours; filter on
-`oauth_client_id` to see only what we created.
+Listing events returns everything on the calendar, not just ours. The documented
+advice is to filter on `oauth_client_id` — **do not**: V1 found it null on
+everything a personal API key creates, with `created_by_id` set to the athlete.
+`coach.plans.events.is_ours` matches the `external_id` pattern instead, exactly
+rather than by prefix, because PLAN-05 deletes what it claims.
+
+### The repeat syntax, verified 30 July 2026 (V4)
+
+The workout text format's repeat line **must not carry a leading dash**:
+
+```
+3x
+ - 4m 105%
+ - 2m 55%
+```
+
+`- 3x` is parsed as an unrecognised step and **silently dropped**, so the set
+renders once instead of three times — 1260s arriving for a 1980s session with no
+error anywhere. `3x` renders as `<IntervalsT Repeat="3" OnDuration=.. OffDuration=..>`.
+Indenting the set's own steps is optional; both forms round-trip correctly.
+
+Note when checking a downloaded zwo that `IntervalsT` carries no `Duration`
+attribute — only `OnDuration`, `OffDuration` and `Repeat`. Summing `Duration`
+alone scores a correct set as a third of its length.
+
+`workout_doc` is also writable, and accepts a nested `{"reps": n, "steps": [...]}`.
+It produces the same `IntervalsT`. The text form is still preferred because
+PLAN-10 wants the coach producing a step list and nothing more file-shaped than
+that, but the parsed `workout_doc` on the event response is the best way to see
+what upstream actually understood from text you sent.
 
 ## Webhooks require an OAuth application, and that collides with SEC-04
 

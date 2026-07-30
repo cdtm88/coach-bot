@@ -41,16 +41,52 @@ class Compliance:
 
 
 def match(conn: psycopg.Connection, session_id: int) -> int | None:
-    """FIT-05: find the prescription this session satisfies, by date and discipline.
+    """FIT-05 and PLAN-07: find the prescription this session satisfies.
 
-    Only unmatched prescriptions are eligible, so two rides on one day cannot both
-    claim the same prescribed session.
+    Two paths, in the order PLAN-07 sets: "the upstream pairing where available,
+    falling back to local date and discipline matching". The platform's own
+    `paired_event_id` is the better evidence when it exists — it survives a session
+    ridden after midnight, a discipline recorded differently upstream, and two rides
+    on one day, all of which the date-and-discipline path can only guess at.
+
+    The fallback is not a degraded path. Most activities are not paired upstream:
+    nothing pairs a ride that had no planned workout, and a Zwift file arriving
+    through the watched folder never went past the platform at all.
+
+    Only unmatched prescriptions are eligible either way, so two rides on one day
+    cannot both claim the same prescribed session.
     """
     with conn.cursor() as cur:
-        cur.execute("select local_date, discipline from sessions where id = %s", (session_id,))
+        cur.execute(
+            "select local_date, discipline, paired_event_id from sessions where id = %s",
+            (session_id,),
+        )
         session = cur.fetchone()
         if session is None:
             return None
+
+        if session["paired_event_id"]:
+            cur.execute(
+                """
+                select p.id from prescriptions p
+                 where p.session_id is null
+                   and p.calendar_event_id = %s
+                 limit 1
+                """,
+                (str(session["paired_event_id"]),),
+            )
+            paired = cur.fetchone()
+            if paired:
+                return int(paired["id"])
+            # Paired upstream to an event we do not hold: the athlete planned it in
+            # the app themselves. Not ours to claim, but the date fallback below
+            # would happily claim it, so say so once and let it.
+            log.info(
+                "session %s is paired to upstream event %s, which is not a coach "
+                "prescription; falling back to date and discipline",
+                session_id,
+                session["paired_event_id"],
+            )
 
         cur.execute(
             """

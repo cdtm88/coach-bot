@@ -84,6 +84,22 @@ def analyzed_at_of(activity: dict[str, Any]) -> datetime | None:
     return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
 
 
+def paired_event_id_of(activity: dict[str, Any]) -> str | None:
+    """PLAN-07: the platform's link from this activity to the planned event it met.
+
+    Kept as text rather than an int. Upstream event ids are numeric today, and
+    every other upstream identifier in this schema is text for the same reason —
+    an id is a name, arithmetic is never done on it, and a type change upstream
+    should not need a migration here.
+
+    Absent on most activities, and that is not a failure: nothing pairs a ride
+    that had no planned workout, and a file arriving through the watched folder
+    never went past the platform to be paired.
+    """
+    raw = activity.get("paired_event_id")
+    return str(raw) if raw not in (None, "", 0) else None
+
+
 def started_at_of(activity: dict[str, Any], tz: ZoneInfo) -> datetime:
     """FIT-10: from the activity data, never from ingest time.
 
@@ -222,6 +238,10 @@ def ingest(
         analyzed is None,
         is_coach_authored(activity),
         backfilled,
+        # PLAN-07: the platform's own link from this activity to the planned event
+        # it satisfied. Better evidence than date and discipline when present, and
+        # absent for anything that had no planned workout — which is most rides.
+        paired_event_id_of(activity),
     )
 
     with conn.transaction(), conn.cursor() as cur:
@@ -236,7 +256,8 @@ def ingest(
                     elevation_m = %s, avg_power_w = %s, np_power_w = %s, max_power_w = %s,
                     avg_hr = %s, max_hr = %s, avg_cadence = %s, sample_count = %s,
                     derived = %s, analyzed_at = %s, derived_provisional = %s,
-                    coach_authored = %s, backfilled = %s
+                    coach_authored = %s, backfilled = %s,
+                    paired_event_id = coalesce(%s, paired_event_id)
                 where id = %s
                 """,
                 (*values, session_id),
@@ -250,9 +271,9 @@ def ingest(
                  started_at, local_date, duration_s, distance_m, elevation_m,
                  avg_power_w, np_power_w, max_power_w, avg_hr, max_hr, avg_cadence,
                  sample_count, derived, analyzed_at, derived_provisional,
-                 coach_authored, backfilled)
+                 coach_authored, backfilled, paired_event_id)
             values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s)
+                    %s, %s, %s, %s, %s, %s)
             returning id
             """,
             values,

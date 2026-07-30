@@ -178,6 +178,51 @@ def export_job(conn: psycopg.Connection, _on: date) -> None:
     log.info("exported facts to %s", path)
 
 
+def sweep_job(api: Any, tz: Any = None) -> Callable[[psycopg.Connection, date], Any]:
+    """PLAN-05: "orphan planned events ... are removed on the nightly pass."
+
+    A factory for the same reason `consolidation_job` is one: this module holds no
+    upstream client, and giving it one would make the scheduler the second place
+    that knows how to talk to intervals.icu.
+
+    Nightly rather than on the ingest loop, and the requirement says so. It is the
+    one job here that deletes something the athlete can see, and once a day is
+    both what is asked for and the cadence at which a mistake is survivable.
+    """
+
+    def job(conn: psycopg.Connection, _on: date) -> Any:
+        from coach.plans import sweep
+
+        result = sweep.run(conn, api, datetime.now(UTC), tz or clock.configured_tz())
+        log.info(
+            "swept %d orphan event(s), left %d past, ignored %d not ours",
+            result.count,
+            len(result.kept_past),
+            result.foreign,
+        )
+        return result
+
+    return job
+
+
+def _sweep_or_none(tz: Any) -> Callable[[psycopg.Connection, date], Any] | None:
+    """PLAN-05's job with its own upstream client, or nothing plus a warning.
+
+    The client is constructed here rather than passed in because this is the only
+    process that runs the sweep. It is allowed to fail: an absent or rejected
+    `INTERVALS_API_KEY` should cost the sweep and not the two jobs that need no
+    network — a night that consolidates and decays but leaves a stale calendar
+    entry is a much smaller problem than a night that does nothing.
+    """
+    try:
+        from coach.ingest import client as clientmod
+
+        return sweep_job(clientmod.Intervals(), tz)
+    except Exception as exc:  # noqa: BLE001 - a missing key must not stop the night
+        log.warning("PLAN-05 sweep not scheduled: %s", exc)
+        return None
+
+
 def consolidation_job(
     propose: Callable[..., Any], tz: Any = None
 ) -> Callable[[psycopg.Connection, date], Any]:
@@ -257,8 +302,19 @@ def main() -> None:
     # against what it wrote rather than against yesterday's picture. Python keeps
     # insertion order and `run_due` iterates in it, so this ordering is the
     # schedule. The export runs last so the file reflects both.
+    #
+    # PLAN-05's sweep goes after consolidation and before the export, because
+    # consolidation can cancel a prescription and the sweep should remove that
+    # session's calendar entry the same night rather than leaving the athlete
+    # looking at a session the coach has already withdrawn.
+    #
+    # Its own client, constructed here: an INTERVALS_API_KEY that is absent or
+    # wrong should stop the sweep, not the two jobs that need no network.
+    sweep = _sweep_or_none(zone)
+
     jobs: dict[str, Callable[[psycopg.Connection, date], Any]] = {
         "consolidation": consolidate,
+        **({"sweep": sweep} if sweep else {}),
         "decay": decay_job,
         "export": export_job,
     }

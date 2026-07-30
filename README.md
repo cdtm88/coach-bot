@@ -26,12 +26,12 @@ Fix the losing document in the same change (SPEC-02).
 
 ## Status
 
-**P00 to P07 are merged, and the system runs.** The memory store and its
+**P00 to P08 are built, and the system runs.** The memory store and its
 invariants, the conversational agent, nightly consolidation, activity ingest with
 session reviews, macros from MacroLog with the body mass trend read from
 intervals.icu wellness, recovery deviation computed against the athlete's own
 baseline, the calendar feeds, and now four week training blocks with cycling and
-gym prescriptions behind a constraint gate. 528 tests, all against a real
+gym prescriptions behind a constraint gate. 588 tests, all against a real
 Postgres.
 
 The live checks that gated P04 were run on 28 July 2026 and the headline is that
@@ -41,11 +41,13 @@ this repository. So the trend pipeline is complete, tested and empty: every
 threshold is asserted on seeded data and the empty series is the first case in
 the suite, so the first real reading starts a trend with no code change.
 
-**P08 is next** — publishing prescriptions to intervals.icu and detecting athlete
-edits. It is the first phase that writes *upstream*. The V1 check that gated it
-has been run: a personal API key has no application identity, so the orphan sweep
-keys on an `external_id` prefix rather than on the documented `oauth_client_id`.
-`docs/state-of-build.md` has what it found.
+**P08 is built** — prescriptions publish to the intervals.icu calendar, keep out
+of busy evenings, get their orphans swept nightly, and the athlete's own edits are
+accepted back into the local plan. It is the first phase that writes *upstream*,
+and two live checks shaped it: a personal API key has no application identity, so
+the sweep keys on an `external_id` pattern rather than the documented
+`oauth_client_id`; and the workout-text repeat line must carry no leading dash, or
+a 3x set silently renders once. `docs/state-of-build.md` has both.
 
 Three processes run it: `coach-ingest` for every inbound feed, `coach-agent` for
 the conversation, `coach-scheduler` for the nightly jobs. Until recently only the
@@ -53,8 +55,8 @@ first existed — the phases were merged and tested against injected clients and
 transports, and nobody's phase owned the wiring at the seams. `src/coach/runtime/`
 is that wiring, and it decides nothing: every rule it applies already had a home.
 
-The scheduler runs all three nightly jobs: consolidation at the athlete's local
-03:00, then confidence decay, then the fact export. Consolidation is the reason
+The scheduler runs four nightly jobs at the athlete's local 03:00: consolidation,
+then PLAN-05's orphan sweep, then confidence decay, then the fact export. Consolidation is the reason
 the memory is self correcting rather than append only — `coach/consolidation/`
 holds the pass, and the model appears at exactly one step of it, proposing
 candidate diffs. What lands is decided in code.
@@ -69,11 +71,11 @@ Later phases are in `docs/prd.md` section 4.
 ## Layout
 
 ```
-migrations/        numbered SQL, applied on boot (001 to 011)
+migrations/        numbered SQL, applied on boot (001 to 012)
 prompts/persona.md the coach's voice, written from docs/seed/
 seeds/athlete.json the initial facts, each traced to the source transcript
 scripts/
-  verify_intervals.py  the live-account checks; V2 and V3a run, V1 gates P08
+  verify_intervals.py  the live-account checks; V1, V2, V3a and V4 all run
   dev-db.sh            throwaway Postgres for the suite
 src/coach/
   config.py        environment only; no credential defaults (SEC-01)
@@ -129,6 +131,12 @@ src/coach/
     load.py        one scale for cycling and gym, and the weekly ceiling
     document.py    the versioned block markdown (BLOCK-01, BLOCK-02)
     generate.py    a plan to prescriptions, validated before anything is written
+  plans/           P08: the planned calendar, upstream
+    events.py      a prescription as an upstream event; who owns one (PLAN-02)
+    workout.py     native workout text for a structured session (PLAN-09/10)
+    publish.py     the upsert, and never into busy time (PLAN-01, PLAN-04)
+    sweep.py       nightly orphan removal; the only thing that deletes (PLAN-05)
+    sync.py        the athlete's own edits, back into the plan (PLAN-06, PLAN-12)
   runtime/         the wiring: what makes the phases into running processes
     models.py      the only place an Anthropic client is built, and the spend guard
     transport.py   the only place that talks to Telegram
