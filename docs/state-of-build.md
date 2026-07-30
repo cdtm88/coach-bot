@@ -3,7 +3,8 @@
 > Read this first in a new session. It says what is done, what is next, and what
 > the environment does that will otherwise waste your time.
 >
-> Last updated 28 July 2026, at `main` after PR #9 and the P04 branch.
+> Last updated 28 July 2026, at `main` after PR #11. Everything through P07
+> is merged.
 
 ## What is merged
 
@@ -20,21 +21,73 @@
 | P04 | Macros from MacroLog, body mass from wellness (HLTH-01 to HLTH-16) | merged (PR #10) |
 | P05 | Recovery from wellness (RECOV-01 to RECOV-06) | merged (PR #10) |
 | P06 | Calendar feeds (CALR-01 to CALR-06, PLAN-08) | merged (PR #10) |
-| P07 | Training blocks and gym programming (BLOCK, GYM, SAFE-04) | built |
+| P07 | Training blocks and gym programming (BLOCK, GYM, SAFE-04) | merged (PR #11) |
 
-458 tests, all against a real Postgres. Schema is at migration 011.
+499 tests, all against a real Postgres. Schema is at migration 011; the
+scheduler's own ledger is created on first use rather than as a migration,
+because it is process bookkeeping rather than part of the memory design.
 
-**M1 and M2 are complete and merged.** P07 is built. Next is **P08** — publishing
-prescriptions to the intervals.icu calendar and detecting athlete edits
-(PLAN-01 to PLAN-12). It is the first phase that writes *upstream*, and it is
-the one V1 gates: run `scripts/verify_intervals.py v1` before starting it, to
-find out whether `oauth_client_id` is populated under a personal API key. If it
-is null, PLAN-05's orphan sweep needs an `external_id` prefix convention
-instead.
+**M1, M2 and P07 are merged, and the system now runs.** Next is **P08** — publishing prescriptions to the
+intervals.icu calendar and detecting athlete edits (PLAN-01 to PLAN-12). It is
+the first phase that writes *upstream*, and it is the one V1 gates: **run
+`scripts/verify_intervals.py v1` before starting it**, to find out whether
+`oauth_client_id` is populated under a personal API key. If it is null,
+PLAN-05's orphan sweep needs an `external_id` prefix convention instead, which
+changes the shape of the phase rather than a detail inside it.
 
 Two soak gates are waiting on the athlete and neither blocks P08: HealthBridge
 writing body mass, and the secret iCal addresses in `CALENDAR_ICS_URLS`. Both
 pipelines are built, tested and idle.
+
+## What runs
+
+Three processes, all console scripts:
+
+| Process | What it does |
+| --- | --- |
+| `coach-ingest` | Every inbound feed: two HTTP routes, the activity poll, wellness, calendar, the sweep, and the webhook drain. |
+| `coach-agent` | Telegram long poll, one turn per backlog. |
+| `coach-scheduler` | The nightly jobs on the athlete's local 03:00. |
+
+**This is new, and it closed a gap the phase table could not show.** Until 28
+July `coach-ingest` was the only one. Eight phases were merged and 458 tests
+passed, and none of it produced a coach the athlete could talk to: nothing
+constructed an `anthropic.Anthropic`, nothing called `api.telegram.org`, and
+`consolidation.pipeline` had no caller. `ANTHROPIC_API_KEY` and
+`TELEGRAM_BOT_TOKEN` were configured and read by nobody.
+
+No phase was at fault. Those requirements are behavioural and are tested against
+injected clients and transports, which is the right way to test them. The wiring
+at each seam was simply nobody's phase. `src/coach/runtime/` is where it lives
+now, and it holds no opinions: every rule it applies — the interruption budget,
+the naturalness checks, the conflict matrix — already had a home, and this calls
+them in order.
+
+### What is still not wired
+
+**The consolidation proposer.** `coach-scheduler` runs decay and the fact export;
+it does not run consolidation, because CONS-02's strict-JSON diff prompt does not
+exist. `scheduler.consolidation_job(propose)` takes a proposer and there is
+nothing to pass it. That is P02's remaining half and it belongs with the
+pipeline, not with the scheduler. The process logs a warning saying so on
+startup rather than pretending.
+
+**Streaming to Telegram.** PERF-01 measures time to first token and the turn loop
+accepts an `on_text` callback, but the agent does not pass one — Telegram has no
+partial-message API worth the complexity, so the reply is sent whole. Revisit if
+PERF-01's p95 becomes a real complaint rather than a number.
+
+### One requirement built early, on purpose
+
+OBS-07's daily spend cap is a P12 requirement. The *stop* is implemented now, in
+`runtime.models.check_spend`, because this is the change that first lets the
+system call a model on a loop and a runaway before P12 would be a real bill. The
+check is a query against `model_calls`, which P01 already writes.
+
+What is implemented is the stop and the coach saying it is capped. The
+notification and the wider OBS-07 acceptance are still P12's. A test asserts the
+single construction site for the client, so the guard has nowhere to be routed
+around.
 
 ## How ingest actually works now
 
@@ -236,7 +289,10 @@ Answers whether `oauth_client_id` is populated under a personal API key — the
 documented scoping rule is written for OAuth clients, and if it is null then
 PLAN-05's orphan sweep must use an `external_id` prefix convention instead.
 
-Not urgent. P08 is a long way off.
+**Now urgent: P08 is the next phase.** This was "not urgent, P08 is a long way
+off" until 28 July. It writes, but it cleans up after itself, and the answer
+changes the shape of PLAN-05 rather than a detail inside it — so it is cheaper to
+run first than to discover halfway through.
 
 ## Open items
 
@@ -245,7 +301,7 @@ Not urgent. P08 is a long way off.
 | 1 | Where does the weight in intervals.icu come from? | — | resolved: nowhere, the field is absent |
 | 2 | Who builds HealthBridge, is it needed? | P04 validation | resolved: yes, needed, and it is the athlete's |
 | 3 | Which wellness fields does the Whoop link populate? | — | resolved: six of seven, `hrvSDNN` never |
-| 4 | Verify no activity gaps after the Strava disconnect | — | needs a key; low urgency now that the poll covers Strava-sourced rides |
+| 4 | Verify no activity gaps after the Strava disconnect | — | open, and now runnable: the key works and the poll covers Strava-sourced rides, so this is a comparison nobody has done rather than a blocker |
 | 5 | Manual activity endpoint | — | resolved |
 | 6 | Transcription | P01 polish | open, needs a decision |
 | 7 | Spend caps | — | resolved: $3/day, $60/month |
@@ -314,11 +370,20 @@ docs/memory-design.md    memory tiers, schema, provenance, conflict matrix
 docs/setup.md            accounts, credentials, tunnel, the folder sync
 docs/intervals-api.md    what the API actually does, verified, with dates
 docs/prd-review.md       the v2.1 review and what it changed
-scripts/verify_intervals.py   the three checks above
+docs/seed/               the source coaching conversation; the audit trail for
+                         every seeded fact and for the persona's voice
+scripts/verify_intervals.py   the checks above
 scripts/dev-db.sh        throwaway Postgres for the suite
 
+src/coach/memory/       P00: the store, supersession, provenance, decay
+src/coach/agent/        P01: prompt assembly, the tool surface, naturalness
+src/coach/consolidation/  P02: the nightly pass and the conflict matrix
+src/coach/ingest/       P03: activities, the archive, reviews, the process
 src/coach/health/       P04 and P05: macros, body mass, recovery
 src/coach/calendars/    P06: the iCal feeds and observed availability
+src/coach/blocks/       P07: the constraint gate, the library, load, generation
+
+The README's layout section lists every module with one line on what it is for.
 ```
 
 On conflict: the design wins on schema and memory semantics, the PRD wins on

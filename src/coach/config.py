@@ -26,6 +26,32 @@ class ConfigError(RuntimeError):
     """A required environment variable is missing or malformed."""
 
 
+# OBS-07's default, here rather than inline so the two readers below cannot
+# disagree about it.
+DEFAULT_DAILY_SPEND_CAP = Decimal("3.00")
+
+
+def daily_spend_cap() -> Decimal:
+    """OBS-07's hard stop, read on its own.
+
+    Separate from :meth:`Config.from_env` because the spend guard needs this and
+    nothing else, and going through the whole config would make the cap depend on
+    `DATABASE_URL` being set. A guard that stops working because an unrelated
+    variable is missing is a guard that fails open, which is the wrong direction
+    for this one.
+    """
+    raw = os.environ.get("DAILY_SPEND_CAP_USD")
+    if not raw:
+        return DEFAULT_DAILY_SPEND_CAP
+    try:
+        cap = Decimal(raw)
+    except Exception as exc:  # noqa: BLE001
+        raise ConfigError(f"DAILY_SPEND_CAP_USD={raw!r} is not a number") from exc
+    if cap <= 0:
+        raise ConfigError("DAILY_SPEND_CAP_USD must be positive")
+    return cap
+
+
 def _require(name: str) -> str:
     value = os.environ.get(name)
     if not value:
@@ -49,17 +75,9 @@ class Config:
         except Exception as exc:  # noqa: BLE001 - surfaced as a config error
             raise ConfigError(f"TZ={tz_name!r} is not a known timezone") from exc
 
-        # OBS-07: the daily hard stop. Configurable without a code change.
-        raw_cap = os.environ.get("DAILY_SPEND_CAP_USD", "3.00")
-        try:
-            cap = Decimal(raw_cap)
-        except Exception as exc:  # noqa: BLE001
-            raise ConfigError(f"DAILY_SPEND_CAP_USD={raw_cap!r} is not a number") from exc
-        if cap <= 0:
-            raise ConfigError("DAILY_SPEND_CAP_USD must be positive")
-
         return cls(
             database_url=_require("DATABASE_URL"),
             timezone=tz,
-            daily_spend_cap_usd=cap,
+            # OBS-07: the daily hard stop. Configurable without a code change.
+            daily_spend_cap_usd=daily_spend_cap(),
         )
