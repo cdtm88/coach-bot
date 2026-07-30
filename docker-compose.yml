@@ -1,9 +1,37 @@
 # The homelab stack of docs/memory-design.md section 11.
 #
-# P00 brings up postgres and applies the schema. The coach-bot, scheduler,
-# ingest and cloudflared services land at the phases that need them (P01, P02,
-# P03 and P03 respectively) and are listed there rather than stubbed here, so
-# `docker compose up` never starts something that does nothing.
+# Five services. `postgres` holds the memory, `migrate` applies the schema and
+# exits, and the three long-running processes are the ones `pyproject.toml`
+# declares as console scripts. Bring it up with `docker compose up -d`; every
+# process waits for the schema, so ordering is not yours to manage.
+#
+# Configuration is `.env` beside this file, read by compose itself rather than
+# passed to the containers wholesale — each service is given the variables it
+# reads and no others, so a leaked environment in one process is not a leaked
+# environment in all three. `.env.example` is the canonical list and
+# `docs/setup.md` section 4 says what each one gates.
+#
+# The two variables with no default are POSTGRES_PASSWORD and ANTHROPIC_API_KEY.
+# Both use `:?` so a missing one fails at `up` with a message, rather than
+# starting a coach that cannot answer.
+
+x-app: &app
+  build: .
+  restart: unless-stopped
+  # Every process reasons in the athlete's zone (TZ-01) and renders logs in the
+  # container's. Unset, COACH_TZ falls back to UTC in code and nothing errors —
+  # every day and week boundary is simply computed in the wrong zone. So it is
+  # required here, loudly, rather than defaulted quietly.
+  environment: &app-env
+    DATABASE_URL: postgresql://coach:${POSTGRES_PASSWORD}@postgres:5432/coach
+    COACH_TZ: ${COACH_TZ:?set COACH_TZ in .env, an IANA name like Asia/Dubai}
+    TZ: ${TZ:-UTC}
+    COACH_LOG_LEVEL: ${COACH_LOG_LEVEL:-INFO}
+  depends_on:
+    postgres:
+      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
 
 services:
   postgres:
@@ -34,6 +62,107 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+
+  # The conversation. Telegram long poll in, one reply per backlog out.
+  agent:
+    <<: *app
+    command: ["coach-agent"]
+    environment:
+      <<: *app-env
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY in .env}
+      # SEC-03: the allowlist is checked on every message, so an empty value
+      # would refuse the athlete rather than admit everyone. Still required,
+      # because a bot that refuses its only user is a silent outage.
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?set TELEGRAM_BOT_TOKEN in .env}
+      TELEGRAM_ALLOWED_CHAT_ID: ${TELEGRAM_ALLOWED_CHAT_ID:?set TELEGRAM_ALLOWED_CHAT_ID in .env}
+      DAILY_SPEND_CAP_USD: ${DAILY_SPEND_CAP_USD:-3.00}
+      PERSONA_PATH: ${PERSONA_PATH:-/app/prompts/persona.md}
+    volumes:
+      # CHAT-02: the persona is a file so the coach's voice can change without a
+      # deploy. Mounted read-only from the checkout for exactly that reason —
+      # baked into the image it would need a rebuild to edit.
+      - ./prompts:/app/prompts:ro
+    # No ports. It reaches Telegram outbound; nothing reaches it.
+
+  # The nightly work, on the athlete's local 03:00: consolidation, then decay,
+  # then the fact export.
+  scheduler:
+    <<: *app
+    command: ["coach-scheduler"]
+    environment:
+      <<: *app-env
+      # Consolidation calls the model once a night, on the heavier tier.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY in .env}
+      DAILY_SPEND_CAP_USD: ${DAILY_SPEND_CAP_USD:-3.00}
+      COACH_EXPORT_DIR: /backups
+    volumes:
+      # MEM-12's markdown export lands beside the pg_dump, in the same folder
+      # postgres mounts. Read-write: this service is the one that writes it.
+      - ./backups:/backups
+
+  # Every inbound feed: two HTTP routes plus five polling loops in one process.
+  ingest:
+    <<: *app
+    command: ["coach-ingest"]
+    environment:
+      <<: *app-env
+      INTERVALS_API_KEY: ${INTERVALS_API_KEY:?set INTERVALS_API_KEY in .env}
+      INTERVALS_ATHLETE_ID: ${INTERVALS_ATHLETE_ID:-0}
+      # Unset means every webhook payload is refused, which is the correct
+      # posture while no app is registered. Not required for that reason.
+      INTERVALS_WEBHOOK_SECRET: ${INTERVALS_WEBHOOK_SECRET:-}
+      # Unset means every macro payload is refused. Required: MacroLog posting
+      # into a route that silently accepted anything would be worse.
+      MACRO_INGEST_SECRET: ${MACRO_INGEST_SECRET:?set MACRO_INGEST_SECRET in .env}
+      # CALR-01: comma separated secret iCal addresses. Bearer secrets — they
+      # live in .env and reach no database and no log line.
+      CALENDAR_ICS_URLS: ${CALENDAR_ICS_URLS:-}
+      COACH_INGEST_PORT: "8080"
+      COACH_FIT_ARCHIVE: /var/fit-archive
+      COACH_FIT_WATCH: /var/fit-inbox
+      COACH_POLL_INTERVAL_S: ${COACH_POLL_INTERVAL_S:-120}
+      COACH_SWEEP_INTERVAL_S: ${COACH_SWEEP_INTERVAL_S:-21600}
+      COACH_WELLNESS_INTERVAL_S: ${COACH_WELLNESS_INTERVAL_S:-3600}
+      COACH_CALENDAR_INTERVAL_S: ${COACH_CALENDAR_INTERVAL_S:-21600}
+    volumes:
+      # FIT-15: the archive is the permanent copy of every file the system has
+      # seen and is never pruned — disconnecting an upstream integration deletes
+      # that source's activities upstream, and this is what survives it. Put the
+      # host path on storage you back up.
+      - ${COACH_FIT_ARCHIVE:-./var/fit-archive}:/var/fit-archive
+      # The drop folder. Anything ending in .fit that lands here is ingested with
+      # no API call and no credential — the primary path for Zwift.
+      - ${COACH_FIT_WATCH:-./var/fit-inbox}:/var/fit-inbox
+    # Deliberately no ports stanza. The two routes are published by the tunnel
+    # below, which reaches this service over the compose network. Publishing them
+    # on the host as well would open a second door nothing needs.
+
+  # The tunnel for the two inbound routes: MacroLog posts from the phone on
+  # mobile data, and the intervals.icu webhook if an app is ever registered.
+  # Nothing else is exposed and never the database.
+  #
+  # Opt-in, because it is the only service that makes anything reachable from
+  # outside: `docker compose --profile tunnel up -d`. Without the profile the
+  # stack runs complete and unreachable, which is the right default for a first
+  # boot and for a machine where MacroLog is not yet configured.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    profiles: ["tunnel"]
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      # A named-tunnel token from the Cloudflare dashboard. It carries the
+      # routing and the credentials, so no config file and no mounted cert.
+      #
+      # Defaulted rather than required, and that is not laziness: compose
+      # interpolates every service's variables whatever profile is selected, so a
+      # `:?` here would fail `docker compose up` on a machine with no Cloudflare
+      # account — exactly the first boot the profile exists to let through.
+      # Empty, cloudflared exits with its own clear message, and only when the
+      # profile is actually enabled.
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      - ingest
 
 volumes:
   coach-db:
