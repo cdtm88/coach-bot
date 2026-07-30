@@ -51,10 +51,11 @@ first existed — the phases were merged and tested against injected clients and
 transports, and nobody's phase owned the wiring at the seams. `src/coach/runtime/`
 is that wiring, and it decides nothing: every rule it applies already had a home.
 
-One thing is still unwired and is called out rather than hidden: the scheduler
-does not run consolidation, because CONS-02's strict-JSON diff prompt has not
-been written. It runs decay and the fact export, and logs a warning about the
-third. See `docs/state-of-build.md`.
+The scheduler runs all three nightly jobs: consolidation at the athlete's local
+03:00, then confidence decay, then the fact export. Consolidation is the reason
+the memory is self correcting rather than append only — `coach/consolidation/`
+holds the pass, and the model appears at exactly one step of it, proposing
+candidate diffs. What lands is decided in code.
 
 Ingest needs no webhook. Zwift rides arrive through a watched folder with no API
 call at all; everything else arrives on a poll whose interval is configurable.
@@ -98,6 +99,7 @@ src/coach/
     bot.py         allowlist, backlog catch-up, message persistence. No transport yet
   consolidation/   P02: the nightly pass
     pipeline.py    read the day, emit diffs, ratify what the matrix allows
+    propose.py     the one step the model appears at: candidate diffs (CONS-02)
     conflict.py    the conflict resolution matrix, in code not in the model (CONS-03)
   ingest/          P03: activities
     parse.py       samples in, computed values out; never a derived aggregate
@@ -130,7 +132,7 @@ src/coach/
     transport.py   the only place that talks to Telegram
     turn.py        one inbound message to one sent reply
     agent.py       the conversational process (coach-agent)
-    scheduler.py   the nightly process (coach-scheduler)
+    scheduler.py   the nightly process: consolidation, decay, export (coach-scheduler)
 tests/             the acceptance criteria, as assertions
 ```
 
