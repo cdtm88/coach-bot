@@ -31,7 +31,7 @@ invariants, the conversational agent, nightly consolidation, activity ingest wit
 session reviews, macros from MacroLog with the body mass trend read from
 intervals.icu wellness, recovery deviation computed against the athlete's own
 baseline, the calendar feeds, and now four week training blocks with cycling and
-gym prescriptions behind a constraint gate. 499 tests, all against a real
+gym prescriptions behind a constraint gate. 528 tests, all against a real
 Postgres.
 
 The live checks that gated P04 were run on 28 July 2026 and the headline is that
@@ -42,8 +42,10 @@ threshold is asserted on seeded data and the empty series is the first case in
 the suite, so the first real reading starts a trend with no code change.
 
 **P08 is next** — publishing prescriptions to intervals.icu and detecting athlete
-edits. It is the first phase that writes *upstream*, and the one the V1 check
-gates: run `scripts/verify_intervals.py v1` before starting it.
+edits. It is the first phase that writes *upstream*. The V1 check that gated it
+has been run: a personal API key has no application identity, so the orphan sweep
+keys on an `external_id` prefix rather than on the documented `oauth_client_id`.
+`docs/state-of-build.md` has what it found.
 
 Three processes run it: `coach-ingest` for every inbound feed, `coach-agent` for
 the conversation, `coach-scheduler` for the nightly jobs. Until recently only the

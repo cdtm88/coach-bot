@@ -3,8 +3,8 @@
 > Read this first in a new session. It says what is done, what is next, and what
 > the environment does that will otherwise waste your time.
 >
-> Last updated 28 July 2026, at `main` after PR #11. Everything through P07
-> is merged.
+> Last updated 30 July 2026, at `main` after PR #13. Everything through P07 is
+> merged, the runtime is wired, and V1 has been run.
 
 ## What is merged
 
@@ -22,18 +22,22 @@
 | P05 | Recovery from wellness (RECOV-01 to RECOV-06) | merged (PR #10) |
 | P06 | Calendar feeds (CALR-01 to CALR-06, PLAN-08) | merged (PR #10) |
 | P07 | Training blocks and gym programming (BLOCK, GYM, SAFE-04) | merged (PR #11) |
+| — | The runtime: `coach-agent`, `coach-scheduler`, OBS-07's stop (PR #12) | merged |
+| — | P02's proposer, so consolidation actually runs (CONS-02, PR #13) | merged |
 
-499 tests, all against a real Postgres. Schema is at migration 011; the
+528 tests, all against a real Postgres. Schema is at migration 011; the
 scheduler's own ledger is created on first use rather than as a migration,
 because it is process bookkeeping rather than part of the memory design.
 
-**M1, M2 and P07 are merged, and the system now runs.** Next is **P08** — publishing prescriptions to the
-intervals.icu calendar and detecting athlete edits (PLAN-01 to PLAN-12). It is
-the first phase that writes *upstream*, and it is the one V1 gates: **run
-`scripts/verify_intervals.py v1` before starting it**, to find out whether
-`oauth_client_id` is populated under a personal API key. If it is null,
-PLAN-05's orphan sweep needs an `external_id` prefix convention instead, which
-changes the shape of the phase rather than a detail inside it.
+**P00 to P07 are merged, the runtime is wired, and consolidation runs.** Next is
+**P08** — publishing prescriptions to the intervals.icu calendar and detecting
+athlete edits (PLAN-01 to PLAN-12). It is the first phase that writes *upstream*.
+
+**V1 has been run and P08 is unblocked.** `oauth_client_id` is null under a
+personal API key, so PLAN-05's orphan sweep uses an `external_id` prefix
+convention rather than the documented application scoping. Upsert on
+`external_id` matches, and bulk-delete accepts the same field. Details and the
+one remaining unknown are in the V1 section below.
 
 Two soak gates are waiting on the athlete and neither blocks P08: HealthBridge
 writing body mass, and the secret iCal addresses in `CALENDAR_ICS_URLS`. Both
@@ -302,21 +306,38 @@ has no documented API path, so running the locked half is a one way door opened
 to answer a question the account no longer poses. Let HealthBridge write without
 `locked`, and revisit only if a value is ever seen to revert.
 
-### V1 — external_id scoping. Writes, self-cleaning. Blocks P08 only.
+### V1 — external_id scoping. RUN 30 July. P08 is unblocked.
 
 ```bash
 uv run python scripts/verify_intervals.py v1
 ```
 
-Creates a probe calendar event, reads it back, upserts it again, deletes it.
-Answers whether `oauth_client_id` is populated under a personal API key — the
-documented scoping rule is written for OAuth clients, and if it is null then
-PLAN-05's orphan sweep must use an `external_id` prefix convention instead.
+Creates a probe calendar event, reads it back, upserts it again, deletes it. Ran
+clean against the live account and answered both questions:
 
-**Now urgent: P08 is the next phase.** This was "not urgent, P08 is a long way
-off" until 28 July. It writes, but it cleans up after itself, and the answer
-changes the shape of PLAN-05 rather than a detail inside it — so it is cheaper to
-run first than to discover halfway through.
+* **`oauth_client_id` is null**, as suspected. `created_by_id` is the athlete's
+  own id, so a personal key has no application identity at all. The documented
+  scoping rule — "events created by your application" — does not apply to us, and
+  **PLAN-05's orphan sweep cannot filter on it.** It must use an `external_id`
+  prefix convention.
+* **Upsert on `external_id` matches**, one event and not two. So PLAN-02 has its
+  idempotency key: writing the same prescription twice updates rather than
+  duplicating.
+* **Bulk-delete accepts an `external_id` filter** and reported
+  `{"eventsDeleted":1}`. Not one of the questions asked, and the most useful
+  answer of the three: the sweep has a working delete primitive keyed on the
+  same field the write is keyed on.
+
+So the shape of P08 is settled. One `external_id` namespace, prefixed so the
+coach's own events are identifiable without an application identity; upsert to
+publish; bulk-delete to sweep.
+
+**One thing this did not establish**, and PLAN-05 should not assume it: the
+delete filtered on an *exact* `external_id`, not a prefix. Whether the filter
+accepts a prefix or wildcard is unknown. It does not block the phase — the coach
+writes the events, so it knows the exact ids it created and can delete by them —
+but a sweep written as "delete everything under my prefix" in one call is
+unverified, and should be built as "delete the ids I hold" until someone checks.
 
 ## Open items
 
@@ -328,6 +349,7 @@ run first than to discover halfway through.
 | 4 | Verify no activity gaps after the Strava disconnect | — | open, and now runnable: the key works and the poll covers Strava-sourced rides, so this is a comparison nobody has done rather than a blocker |
 | 5 | Manual activity endpoint | — | resolved |
 | 6 | Transcription | P01 polish | open, needs a decision |
+| 7 | Does bulk-delete match an `external_id` *prefix*, or only an exact value? | — | open, and P08 does not need it: exact-match deletion is enough because the coach holds the ids it wrote |
 | 7 | Spend caps | — | resolved: $3/day, $60/month |
 | 8 | Raw message retention period | — | open, needs a decision |
 | 9 | Persona seed | — | resolved |
