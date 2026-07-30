@@ -195,8 +195,9 @@ def apply(conn: psycopg.Connection, edits: list[Edit]) -> None:
             cur.execute(
                 """
                 insert into adjustment_events
-                    (prescription_id, trigger, evidence, before_spec, after_spec, announced)
-                values (%s, 'athlete_edit', %s, %s, %s, false)
+                    (prescription_id, trigger, evidence, before_spec, after_spec, announced,
+                     authority)
+                values (%s, 'athlete_edit', %s, %s, %s, false, 'athlete')
                 """,
                 (
                     edit.prescription_id,

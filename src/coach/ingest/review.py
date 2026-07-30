@@ -15,6 +15,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from coach import clock
 from coach.health import recovery as recoverymod
@@ -133,15 +134,24 @@ def compliance(conn: psycopg.Connection, session_id: int, prescription_id: int) 
 
 
 def attach(conn: psycopg.Connection, session_id: int, prescription_id: int) -> Compliance:
-    """Link the two and mark the prescription completed (FIT-05)."""
+    """Link the two, mark the prescription completed, and freeze the compliance.
+
+    FIT-05, and P09's ADJ-01 depends on the freezing. The figure used to be
+    computed here and returned without being stored, which worked while the only
+    reader was the review written in the same call. It cannot work now: an ADJ-02
+    downgrade rewrites the target spec, so recomputing later would compare the
+    ride against the *reduced* target and compliance would improve every time the
+    coach eased something.
+    """
     result = compliance(conn, session_id, prescription_id)
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "update sessions set prescription_id = %s where id = %s", (prescription_id, session_id)
         )
         cur.execute(
-            "update prescriptions set status = 'completed', session_id = %s where id = %s",
-            (session_id, prescription_id),
+            "update prescriptions set status = 'completed', session_id = %s, compliance = %s "
+            "where id = %s",
+            (session_id, Jsonb(result.as_dict()), prescription_id),
         )
     return result
 
