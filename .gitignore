@@ -21,7 +21,13 @@ venv/
 .ruff_cache/
 .coverage
 htmlcov/
-uv.lock
+
+# uv.lock is deliberately NOT ignored. This is an application that gets deployed
+# from a git checkout, not a library, so the lock is part of what a commit means:
+# the same commit has to produce the same image. Without it `anthropic>=0.69`
+# resolves to whatever is newest at build time, and a rebuild in six months
+# installs a major version the code has never run against — which would fail on
+# the athlete's first message rather than in CI.
 
 # Local test Postgres cluster
 .pgdata/

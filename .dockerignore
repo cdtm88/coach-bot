@@ -1,0 +1,35 @@
+# What never reaches the build daemon.
+#
+# The first entry is the one that matters for more than speed. The Dockerfile
+# copies named paths rather than `.`, so `.env` is not in the image today — but
+# this is what keeps that true if a broad `COPY . .` is ever added, and SEC-01's
+# "never commit .env" and "never ship .env" are the same concern one step apart.
+.env
+.env.*
+!.env.example
+
+# 101M of the 108M working tree, and none of it belongs in an image that installs
+# its own dependencies. Sending it costs build time on every rebuild.
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+.git/
+.github/
+
+# Runtime state. These are bind-mounted at run time from the host, so a copy in
+# the image would be a stale shadow of the real thing — and the FIT archive is
+# the one directory in the system that must never be duplicated or pruned
+# (FIT-15).
+var/
+backups/
+
+# Documentation and tests. Both are the reason this repository is reviewable and
+# neither is needed to run it. Excluded rather than copied so the image stays
+# small and `pip install` cannot pick up a test dependency.
+docs/
+tests/
+*.md
+!README.md

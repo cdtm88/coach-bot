@@ -15,9 +15,21 @@
 # Both use `:?` so a missing one fails at `up` with a message, rather than
 # starting a coach that cannot answer.
 
+# Docker's default json-file driver grows without limit. Three chatty services
+# over months is a disk filler, and the disk it fills is the one holding the FIT
+# archive — the one directory in the system that is never meant to be pruned
+# (FIT-15). Capped here rather than left to the daemon's config so the bound
+# travels with the stack.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 x-app: &app
   build: .
   restart: unless-stopped
+  logging: *logging
   # Every process reasons in the athlete's zone (TZ-01) and renders logs in the
   # container's. Unset, COACH_TZ falls back to UTC in code and nothing errors —
   # every day and week boundary is simply computed in the wrong zone. So it is
@@ -37,6 +49,7 @@ services:
   postgres:
     image: postgres:17
     restart: unless-stopped
+    logging: *logging
     environment:
       POSTGRES_USER: coach
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
@@ -118,6 +131,13 @@ services:
       # live in .env and reach no database and no log line.
       CALENDAR_ICS_URLS: ${CALENDAR_ICS_URLS:-}
       COACH_INGEST_PORT: "8080"
+      # 0.0.0.0 inside the container, and this is required rather than relaxed.
+      # `cloudflared` is a separate container with its own network namespace, so
+      # binding to the coach's loopback would make the routes reachable by
+      # nothing and MacroLog's posts would never arrive. What keeps this narrow
+      # is the absence of a `ports:` stanza below: no published port means the
+      # compose network and nowhere else.
+      COACH_INGEST_HOST: "0.0.0.0"
       COACH_FIT_ARCHIVE: /var/fit-archive
       COACH_FIT_WATCH: /var/fit-inbox
       COACH_POLL_INTERVAL_S: ${COACH_POLL_INTERVAL_S:-120}
@@ -136,6 +156,45 @@ services:
     # Deliberately no ports stanza. The two routes are published by the tunnel
     # below, which reaches this service over the compose network. Publishing them
     # on the host as well would open a second door nothing needs.
+    #
+    # The only service with something to probe. `GET /health` answers without a
+    # secret precisely so it can be used this way, and a wedged ingest process is
+    # the failure most worth catching: it is six loops in one process, and the
+    # athlete would notice a missing ride long before they noticed a stuck thread.
+    # `agent` and `scheduler` have no route and no equivalent — a long poll that
+    # has stopped looks identical to one that is waiting.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5).status==200 else 1)\""]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # MEM-12's other half: the nightly pg_dump beside the markdown fact export.
+  #
+  # In the postgres image so `pg_dump` matches the server version — a newer
+  # server dumped by an older client refuses outright. Not in the application,
+  # because it needs the database credentials and a host destination that
+  # `coach-scheduler` has no business holding.
+  #
+  # It dumps at 03:30, after the 03:00 consolidation. MEM-12 wants both artefacts
+  # "dated after the most recent consolidation", so a dump at 02:00 would satisfy
+  # the letter and miss the night's ratified facts.
+  backup:
+    image: postgres:17
+    restart: unless-stopped
+    logging: *logging
+    entrypoint: ["/bin/sh", "/usr/local/bin/backup.sh"]
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      TZ: ${TZ:-UTC}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+    volumes:
+      - ./scripts/backup.sh:/usr/local/bin/backup.sh:ro
+      - ./backups:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   # The tunnel for the two inbound routes: MacroLog posts from the phone on
   # mobile data, and the intervals.icu webhook if an app is ever registered.
