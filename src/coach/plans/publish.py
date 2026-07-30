@@ -120,9 +120,7 @@ def _clashes(start: datetime, duration_s: int, spans: list[tuple[datetime, datet
     return any(start < busy_end and busy_start < end for busy_start, busy_end in spans)
 
 
-def place(
-    conn: psycopg.Connection, prescription: dict[str, Any], tz: ZoneInfo
-) -> Placement | None:
+def place(conn: psycopg.Connection, prescription: dict[str, Any], tz: ZoneInfo) -> Placement | None:
     """PLAN-04: find a slot, or report that there is none.
 
     Order matters. The planned time is tried first — an unbusy evening must not be

@@ -306,9 +306,7 @@ def test_the_repeat_line_carries_no_dash() -> None:
     arriving for a 1980s session, with no error from anywhere. `3x` renders as
     `<IntervalsT Repeat="3">`.
     """
-    text = workout.render(
-        [{"repeat": 3, "steps": [{"duration_s": 240, "power_pct": 105}]}]
-    )
+    text = workout.render([{"repeat": 3, "steps": [{"duration_s": 240, "power_pct": 105}]}])
 
     assert text.splitlines()[0] == "3x"
     assert not text.startswith("- ")
@@ -410,13 +408,18 @@ def test_no_workout_file_is_ever_generated() -> None:
 def test_a_block_publishes_as_planned_events(conn: psycopg.Connection) -> None:
     """PLAN-01: "a generated block appears as planned events upstream"."""
     first = prescribe(conn, SOON)
-    second = prescribe(conn, SOON + timedelta(days=2), discipline="gym", spec={
-        "duration_s": 2700,
-        "purpose": "Strength",
-        "discipline": "gym",
-        "rpe_target": 7,
-        "movements": [{"name": "Goblet squat", "sets": 3, "reps": "10"}],
-    })
+    second = prescribe(
+        conn,
+        SOON + timedelta(days=2),
+        discipline="gym",
+        spec={
+            "duration_s": 2700,
+            "purpose": "Strength",
+            "discipline": "gym",
+            "rpe_target": 7,
+            "movements": [{"name": "Goblet squat", "sets": 3, "reps": "10"}],
+        },
+    )
     api = FakeApi()
 
     result = publish.publish(conn, api, DUBAI)

@@ -486,9 +486,7 @@ def main() -> None:
     ap.add_argument("--lock", action="store_true", help="v3: send locked=true (NOT REVERSIBLE)")
     ap.add_argument("--date", help="v3 --write: the day to write to. Pick one you do not need.")
     ap.add_argument("--check-date", help="v3: re-read this date and report whether it survived")
-    ap.add_argument(
-        "--no-cleanup", action="store_true", help="v1/v4: leave the probe event behind"
-    )
+    ap.add_argument("--no-cleanup", action="store_true", help="v1/v4: leave the probe event behind")
     args = ap.parse_args()
 
     with _api() as api:
