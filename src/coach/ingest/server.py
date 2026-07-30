@@ -245,8 +245,18 @@ def serve(
 ) -> ThreadingHTTPServer:
     """Bind and return the server without serving. The caller decides the loop.
 
-    Bound to loopback by default: the tunnel is what makes it reachable, so
-    binding to every interface would only widen the exposure.
+    Loopback by default, because that is the safe answer when this runs directly
+    on a host: the tunnel is what makes the routes reachable and binding wider
+    would only widen the exposure.
+
+    **Under compose it has to be `0.0.0.0`, and that is not a loosening.**
+    `cloudflared` is a separate container with its own network namespace, so the
+    coach's loopback is not the tunnel's — bound to 127.0.0.1 inside the
+    container, the routes are reachable by nothing at all and MacroLog's posts
+    would never arrive. What keeps the exposure narrow there is the absence of a
+    `ports:` stanza: 0.0.0.0 inside a container with no published port means the
+    compose network and nowhere else. `COACH_INGEST_HOST` is how the deployment
+    says so, and `docker-compose.yml` sets it with that reasoning attached.
     """
     return ThreadingHTTPServer((host, port), make_handler(connect, wake, tz))
 
@@ -508,8 +518,9 @@ def main() -> None:
     for thread in threads:
         thread.start()
 
-    httpd = serve(db.connect, nudge.set, port=port, tz=tz)
-    log.info("ingest listening on %s, routes %s and %s", port, ROUTE, MACRO_ROUTE)
+    host = os.environ.get("COACH_INGEST_HOST", "127.0.0.1")
+    httpd = serve(db.connect, nudge.set, host=host, port=port, tz=tz)
+    log.info("ingest listening on %s:%s, routes %s and %s", host, port, ROUTE, MACRO_ROUTE)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

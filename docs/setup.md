@@ -215,6 +215,10 @@ Run all three. Only `coach-ingest` needs the tunnel.
 
 #### Under compose
 
+> The exact command sequence for a first deployment, including the backup restore
+> test, is [`docs/deploy.md`](deploy.md). This section is the reasoning behind it.
+
+
 `docker-compose.yml` defines all five services. Bring the stack up with:
 
 ```bash

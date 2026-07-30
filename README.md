@@ -16,6 +16,7 @@ first in a new session.
 | [`docs/prd.md`](docs/prd.md) | Scope, requirements, acceptance, phase completion, open items |
 | [`docs/memory-design.md`](docs/memory-design.md) | Memory tiers, schema, key namespace, provenance, conflict matrix |
 | [`docs/setup.md`](docs/setup.md) | Accounts, credentials, tunnel, infrastructure |
+| [`docs/deploy.md`](docs/deploy.md) | The command sequence for a first deployment, and how to verify the backup |
 | [`docs/intervals-api.md`](docs/intervals-api.md) | What the intervals.icu API actually does, verified, with dates |
 | [`docs/prd-review.md`](docs/prd-review.md) | Record of the v2.1 review and what it changed |
 | [`docs/seed/`](docs/seed/) | The source coaching conversation. The audit trail for every seeded fact and for the persona's voice |
@@ -77,11 +78,14 @@ Later phases are in `docs/prd.md` section 4.
 
 ```
 migrations/        numbered SQL, applied on boot (001 to 013)
+Dockerfile         two stages; deps from the committed uv.lock, uv not shipped
+docker-compose.yml six services; the tunnel is opt-in behind a profile
 prompts/persona.md the coach's voice, written from docs/seed/
 seeds/athlete.json the initial facts, each traced to the source transcript
 scripts/
   verify_intervals.py  the live-account checks; V1, V2, V3a and V4 all run
   dev-db.sh            throwaway Postgres for the suite
+  backup.sh            MEM-12's pg_dump half; runs in the postgres image
 src/coach/
   config.py        environment only; no credential defaults (SEC-01)
   clock.py         local day and week boundaries, and the configured zone (TZ-01/02/03)
