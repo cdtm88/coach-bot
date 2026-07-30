@@ -172,7 +172,74 @@ class Intervals:
             newest=newest.isoformat(),
         ).json()
 
+    def events(self, oldest: date, newest: date) -> list[dict[str, Any]]:
+        """The planned calendar over a window. PLAN-05, PLAN-06 and PLAN-12.
+
+        Returns *everything* on the calendar, not only what the coach created —
+        the athlete's own races and notes come back too. Filtering to ours is the
+        caller's job and `coach.plans.events.is_ours` is how, because V1 settled
+        that the documented `oauth_client_id` filter is null under a personal API
+        key and cannot be used.
+        """
+        return self._get(
+            f"/athlete/{self.athlete_id}/events",
+            oldest=oldest.isoformat(),
+            newest=newest.isoformat(),
+        ).json()
+
     # --- writes --------------------------------------------------------
+
+    def upsert_events(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """PLAN-01 and PLAN-02: publish planned workouts, keyed on `external_id`.
+
+        `upsert=true` is what makes PLAN-02's "changing a prescription twice
+        leaves exactly one planned event" a property of the API rather than
+        something we maintain: an `external_id` already present is updated in
+        place. V1 confirmed it against the live account under a personal key.
+
+        Returns the created or updated events, which carry the upstream ids —
+        needed because PLAN-07's `paired_event_id` is an upstream id and has to
+        resolve back to a prescription.
+
+        An empty list is not sent. Upstream's response to one is undocumented and
+        a call that cannot accomplish anything is not worth finding out with.
+        """
+        if not events:
+            return []
+        response = self._client.post(
+            f"/athlete/{self.athlete_id}/events/bulk",
+            params={"upsert": "true"},
+            json=events,
+        )
+        self.last_limit = RateLimit.from_headers(response.headers)
+        if response.status_code >= 400:
+            raise IntervalsError(
+                f"{response.status_code} publishing {len(events)} event(s): {response.text[:200]}"
+            )
+        return response.json()
+
+    def delete_events(self, external_ids: list[str]) -> int:
+        """PLAN-05's orphan removal. Returns how many upstream says it deleted.
+
+        Deletes by exact `external_id`, one entry per id. V1 verified the exact
+        form and returned `{"eventsDeleted": 1}`; whether the filter also accepts
+        a prefix or a wildcard is **unverified**, so the caller passes the ids it
+        holds rather than a pattern. See `docs/state-of-build.md` open item 7.
+        """
+        if not external_ids:
+            return 0
+        response = self._client.put(
+            f"/athlete/{self.athlete_id}/events/bulk-delete",
+            json=[{"external_id": eid} for eid in external_ids],
+        )
+        self.last_limit = RateLimit.from_headers(response.headers)
+        if response.status_code >= 400:
+            raise IntervalsError(
+                f"{response.status_code} deleting {len(external_ids)} event(s): "
+                f"{response.text[:200]}"
+            )
+        body = response.json() if response.content else {}
+        return int(body.get("eventsDeleted", 0)) if isinstance(body, dict) else 0
 
     def upload_file(
         self, data: bytes, filename: str, external_id: str | None = None

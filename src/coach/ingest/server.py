@@ -58,6 +58,7 @@ from coach.ingest import client as clientmod
 from coach.ingest import reconcile as reconcilemod
 from coach.ingest import service
 from coach.ingest import webhook as webhookmod
+from coach.plans import sync as plansyncmod
 
 log = logging.getLogger(__name__)
 
@@ -412,6 +413,39 @@ def calendar_poller(
     _loop("calendar", stop, every, once)
 
 
+def plan_poller(
+    connect: Connect,
+    client: clientmod.Intervals,
+    tz: ZoneInfo,
+    stop: threading.Event,
+    interval_s: int | None = None,
+) -> None:
+    """Notice athlete edits to the planned calendar (PLAN-06, PLAN-12).
+
+    Its own clock, and a slow one. This is the only loop reading a calendar the
+    athlete edits by hand, and PLAN-12's acceptance is "within one sync" rather
+    than immediately — a session moved this afternoon does not need to be
+    reconciled this minute, and the push notification that would tell us sooner
+    needs a registered application, which SEC-04 rules out.
+
+    Deliberately read-only upstream. Publishing is a block-change action and the
+    sweep is the nightly pass's; a loop that both read and wrote this calendar
+    could fight with the athlete inside a single interval.
+    """
+    every = interval_s if interval_s is not None else plansyncmod.interval_s()
+
+    def once() -> dict[str, Any]:
+        with connect() as conn:
+            result = plansyncmod.run(conn, client, datetime.now(UTC), tz)
+        return {
+            "edits": result.count,
+            "cancelled": len(result.deleted_upstream),
+            "availability_proposals": len(result.queued),
+        }
+
+    _loop("plans", stop, every, once)
+
+
 def main() -> None:
     """Run the webhook route and the backstop loop together."""
     from coach import db
@@ -460,6 +494,15 @@ def main() -> None:
             args=(db.connect, tz, stop),
             daemon=True,
             name="calendar",
+        ),
+        # PLAN-06 and PLAN-12: the athlete's own edits to the planned calendar.
+        # Hourly, and read-only upstream — publishing and the orphan sweep are
+        # not this loop's.
+        threading.Thread(
+            target=plan_poller,
+            args=(db.connect, client, tz, stop),
+            daemon=True,
+            name="plans",
         ),
     ]
     for thread in threads:

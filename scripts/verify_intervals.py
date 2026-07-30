@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""The three empirical checks against a live intervals.icu account.
+"""The four empirical checks against a live intervals.icu account.
 
 Each one blocks something and none can be answered from the OpenAPI spec, which
 is why they are here rather than settled in docs/intervals-api.md. Run them with
@@ -8,6 +8,7 @@ a real key and paste the output into that file with the date.
     uv run python scripts/verify_intervals.py v2      # read only
     uv run python scripts/verify_intervals.py v3      # read only by default
     uv run python scripts/verify_intervals.py v1      # writes, self cleaning
+    uv run python scripts/verify_intervals.py v4      # writes, self cleaning
     uv run python scripts/verify_intervals.py all     # every read only check
 
 Needs INTERVALS_API_KEY in the environment. Nothing here prints it, and nothing
@@ -318,14 +319,174 @@ def v1(api: clientmod.Intervals, cleanup: bool = True) -> None:
     _rate_limit(api)
 
 
+# --- V4 ---------------------------------------------------------------------
+
+WORKOUT_MARKER = "coach:verify:workout"
+
+# The step list V4 publishes. Chosen so the rendered file is checkable rather than
+# plausible: three distinct power targets, a ramp, and a repeat whose count and
+# durations are all different numbers, so a zwo that dropped or flattened any one
+# of them cannot still look right.
+PROBE_STEPS = [
+    {"section": "Warmup", "duration_s": 600, "ramp_pct": (50, 70)},
+    {
+        "section": "Main",
+        "repeat": 3,
+        "steps": [
+            {"duration_s": 240, "power_pct": 105},
+            {"duration_s": 120, "power_pct": 55},
+        ],
+    },
+    {"section": "Cooldown", "duration_s": 300, "power_pct": 45},
+]
+
+
+def v4(api: clientmod.Intervals, cleanup: bool = True) -> None:
+    """Does native workout text compile into a zwo with the intervals we meant?
+
+    PLAN-09's acceptance criterion, and the only one in P08 that a fake cannot
+    answer: "the platform renders a published session as a valid zwo with the
+    intended intervals". PLAN-10 forbids us generating the file, so the whole
+    requirement rests on the platform doing it correctly from our text.
+    """
+    from coach.plans import workout as workoutmod
+
+    print("V4. Native workout text compiles to a zwo (PLAN-09, PLAN-10)")
+    print("=" * 60)
+
+    text = workoutmod.render(PROBE_STEPS)
+    print("  the text we publish:")
+    for line in text.splitlines():
+        print(f"    {line}")
+
+    when = (date.today() + timedelta(days=91)).isoformat() + "T06:00:00"
+    event = {
+        "category": "WORKOUT",
+        "start_date_local": when,
+        "type": "Ride",
+        "name": "coach-bot workout probe",
+        "description": text,
+        "external_id": WORKOUT_MARKER,
+        "moving_time": 1980,
+    }
+
+    print(f"\n  1. publish one structured event dated {when}")
+    created = api.upsert_events([event])
+    event_id = created[0].get("id") if created else None
+    print(f"     upstream id {event_id}")
+
+    if not event_id:
+        print("     FAILED: no id returned, so there is nothing to download.")
+        return
+
+    print("  2. download it back as zwo")
+    response = api._client.get(  # noqa: SLF001
+        f"/athlete/{api.athlete_id}/events/{event_id}/download.zwo"
+    )
+    print(f"     status {response.status_code}, {len(response.content)} bytes")
+
+    if response.status_code >= 400:
+        print(f"     FAILED: {response.text[:300]}")
+    else:
+        _report_zwo(response.text)
+
+    if cleanup:
+        print("\n  3. cleanup: bulk-delete by external_id")
+        deleted = api.delete_events([WORKOUT_MARKER])
+        print(f"     eventsDeleted = {deleted}")
+
+    _rate_limit(api)
+
+
+def _report_zwo(body: str) -> None:
+    """Say what the platform produced, and whether it is what we asked for.
+
+    **Total ridden time is the real test, not the element count.** A zwo may express
+    a repeat either way — three expanded blocks, or one block with a `Repeat`
+    attribute — and both are correct. What is not correct is a 3x set arriving as a
+    1x, and the only thing that catches that regardless of encoding is the duration
+    summing to what we asked for. `PROBE_STEPS` is 1980 seconds; a file totalling
+    660 has silently dropped two thirds of the session.
+    """
+    import re
+    import xml.etree.ElementTree as ET
+
+    expected = _expected_seconds(PROBE_STEPS)
+
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError as exc:
+        print(f"     NOT VALID XML: {exc}")
+        print(f"     first 200 chars: {body[:200]!r}")
+        return
+
+    print(f"     parses as XML, root <{root.tag}>")
+    elements = [el for el in root.iter() if el.tag not in {root.tag, "workout"}]
+    print(f"     elements: {', '.join(sorted({el.tag for el in elements})) or 'none'}")
+
+    powers = sorted({m for m in re.findall(r'Power\w*="([\d.]+)"', body)})
+    print(f"     distinct power attributes: {len(powers)} -> {powers[:8]}")
+
+    # A repeat comes back as `<IntervalsT Repeat="3" OnDuration=.. OffDuration=..>`
+    # and carries **no** `Duration` attribute. An earlier version of this check
+    # skipped anything without one, so it scored a correctly rendered set as a
+    # third of its length and reported a shrunk session that was fine. Both
+    # shapes are summed here.
+    total = 0
+    for el in elements:
+        try:
+            repeat = int(el.get("Repeat") or 1)
+            on = int(el.get("OnDuration") or 0)
+            off = int(el.get("OffDuration") or 0)
+            if on or off:
+                total += repeat * (on + off)
+            elif el.get("Duration") is not None:
+                total += repeat * int(float(el.get("Duration")))
+        except ValueError:
+            continue
+
+    print(f"     total duration: {total}s (we asked for {expected}s)")
+
+    print()
+    if total == expected and len(powers) >= 3:
+        print("  VERDICT: the platform compiled our text into a structured file with")
+        print("           the intervals we meant. PLAN-09 and PLAN-10 hold: the coach")
+        print("           sends a step list and never a file.")
+    elif total and total < expected:
+        print(f"  VERDICT: THE SESSION SHRANK. {total}s arrived against {expected}s sent.")
+        print("           Something dropped, most likely the repeat count — a 3x set")
+        print("           rendered as 1x would be ridden a third as hard. Do not trust")
+        print("           PLAN-09 until this is understood. Full file below.")
+        print("\n".join(f"       {line}" for line in body.splitlines()))
+    else:
+        print(f"  VERDICT: cannot confirm. {total}s parsed against {expected}s sent.")
+        print("           Read the file below rather than assuming either way.")
+        print("\n".join(f"       {line}" for line in body.splitlines()))
+
+
+def _expected_seconds(steps: list[dict[str, Any]]) -> int:
+    """What `PROBE_STEPS` should add up to, from the step list rather than a constant.
+
+    Computed so editing the probe cannot leave a stale expectation behind — the
+    number in the verdict is derived from the same thing that was published.
+    """
+    total = 0
+    for step in steps:
+        if "repeat" in step:
+            total += int(step["repeat"]) * _expected_seconds(step.get("steps") or [])
+        else:
+            total += int(step.get("duration_s") or 0)
+    return total
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("check", choices=["v1", "v2", "v3", "all"])
+    ap.add_argument("check", choices=["v1", "v2", "v3", "v4", "all"])
     ap.add_argument("--write", action="store_true", help="v3: perform the wellness write")
     ap.add_argument("--lock", action="store_true", help="v3: send locked=true (NOT REVERSIBLE)")
     ap.add_argument("--date", help="v3 --write: the day to write to. Pick one you do not need.")
     ap.add_argument("--check-date", help="v3: re-read this date and report whether it survived")
-    ap.add_argument("--no-cleanup", action="store_true", help="v1: leave the probe event behind")
+    ap.add_argument("--no-cleanup", action="store_true", help="v1/v4: leave the probe event behind")
     args = ap.parse_args()
 
     with _api() as api:
@@ -333,6 +494,8 @@ def main() -> None:
             v2(api)
         elif args.check == "v1":
             v1(api, cleanup=not args.no_cleanup)
+        elif args.check == "v4":
+            v4(api, cleanup=not args.no_cleanup)
         elif args.check == "v3":
             if args.check_date:
                 v3_check(api, args.check_date)
@@ -350,7 +513,7 @@ def main() -> None:
             v2(api)
             print("\n")
             v3_read(api)
-            print("\n  (v1 and the v3 write half are not in `all`: they write.)")
+            print("\n  (v1, v4 and the v3 write half are not in `all`: they write.)")
 
 
 if __name__ == "__main__":
