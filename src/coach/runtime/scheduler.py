@@ -154,7 +154,15 @@ def run_due(
 
 
 def decay_job(conn: psycopg.Connection, _on: date) -> None:
-    """CONS-07: unconfirmed facts lose confidence by category half life."""
+    """CONS-07: unconfirmed facts lose confidence by category half life.
+
+    Consolidation's step 9 decays too, so on most nights this finds nothing to
+    do. It is not redundant: `pipeline.run` returns before step 9 on a day with
+    no messages and no telemetry, and a fact does not stop ageing because the
+    athlete was quiet. `apply_decay` recomputes from the curve rather than
+    stepping down from the stored value, so running both is idempotent — which is
+    what makes covering the gap this cheap.
+    """
     changed = factmod.apply_decay(conn)
     log.info("decayed %d facts", changed)
 
@@ -170,18 +178,30 @@ def export_job(conn: psycopg.Connection, _on: date) -> None:
     log.info("exported facts to %s", path)
 
 
-def consolidation_job(propose: Callable[..., Any]) -> Callable[[psycopg.Connection, date], Any]:
+def consolidation_job(
+    propose: Callable[..., Any], tz: Any = None
+) -> Callable[[psycopg.Connection, date], Any]:
     """CONS-01, bound to a proposer.
 
     A factory because the pass needs a model and this module holds none — the
     same separation `coach.consolidation.pipeline` already makes, kept rather
     than collapsed.
+
+    The offset is TZ-01 and it is not cosmetic. `pipeline.gather` windows on
+    `local midnight - tz_offset`, and its default of zero windows on a UTC day.
+    In Asia/Dubai that misses everything the athlete sent between local midnight
+    and 04:00 and pulls in the next day's small hours instead — a message at
+    01:00 would be consolidated into the wrong day, or twice, or not at all.
     """
 
     def job(conn: psycopg.Connection, on: date) -> Any:
         from coach.consolidation import pipeline
 
-        result = pipeline.run(conn, on, propose)
+        zone = tz or clock.configured_tz()
+        # The offset *on the day being consolidated*, not today's. They differ
+        # across a DST boundary, and the window has to match the day it claims.
+        offset = datetime.combine(on, time(12)).replace(tzinfo=zone).utcoffset() or timedelta(0)
+        result = pipeline.run(conn, on, propose, tz_offset=offset)
         log.info("consolidated %s: %s", on, result)
         return result
 
@@ -220,20 +240,28 @@ def main() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())
 
-    # The consolidation proposer is the one piece still to be written: CONS-02's
-    # strict-JSON diff prompt is P02's remaining half, and it belongs with the
-    # pipeline rather than here. Until it exists the scheduler runs the two jobs
-    # that need no model, which is honest — decay and the export are real work
-    # and they have never run either.
+    # Resolved once and handed to both, rather than left to each to read for
+    # itself. TZ-03 turns on the whole process agreeing on one answer, and the
+    # hour that decides what is due has to be the hour the window is cut on.
+    zone = clock.configured_tz()
+
+    # Consolidation needs a connection to bind its proposer to, and this process
+    # holds none between ticks — `serve` opens one per wake. So the job is built
+    # per run, from whatever connection the tick is using.
+    def consolidate(conn: psycopg.Connection, on: date) -> Any:
+        from coach.consolidation import propose
+
+        return consolidation_job(propose.build(client, conn), zone)(conn, on)
+
+    # CONS-01 first: consolidation writes the day's facts, and decay should run
+    # against what it wrote rather than against yesterday's picture. Python keeps
+    # insertion order and `run_due` iterates in it, so this ordering is the
+    # schedule. The export runs last so the file reflects both.
     jobs: dict[str, Callable[[psycopg.Connection, date], Any]] = {
+        "consolidation": consolidate,
         "decay": decay_job,
         "export": export_job,
     }
-    log.warning(
-        "consolidation is not scheduled: no proposer is wired. Decay and the export run. "
-        "See docs/state-of-build.md."
-    )
-    del client  # constructed to fail fast on a missing key; unused until the proposer exists
 
-    serve(stop, jobs)
+    serve(stop, jobs, tz=zone)
     log.info("scheduler stopped")

@@ -63,14 +63,38 @@ now, and it holds no opinions: every rule it applies — the interruption budget
 the naturalness checks, the conflict matrix — already had a home, and this calls
 them in order.
 
-### What is still not wired
+### The consolidation proposer, now written
 
-**The consolidation proposer.** `coach-scheduler` runs decay and the fact export;
-it does not run consolidation, because CONS-02's strict-JSON diff prompt does not
-exist. `scheduler.consolidation_job(propose)` takes a proposer and there is
-nothing to pass it. That is P02's remaining half and it belongs with the
-pipeline, not with the scheduler. The process logs a warning saying so on
-startup rather than pretending.
+P02's remaining half. `coach/consolidation/propose.py` is the callable
+`pipeline.run` always took and nothing ever supplied, and the scheduler now runs
+consolidation, decay and the export in that order — decay against what the night
+wrote rather than against yesterday's picture.
+
+Three things about it are worth knowing without reading it:
+
+* **The tool is forced.** CONS-02's "strict JSON" is `tool_choice`, not a request
+  in the prompt. `llm.client.complete` grew a `tool_choice` parameter for this;
+  conversation leaves it unset, because a coach that must call a tool before it
+  may speak is not a coach.
+* **The model cannot claim `computed` provenance.** MEM-04 has four values and
+  MEM-08 reserves computed figures for SQL. `conflict.MEASURED` counts computed
+  as measured, so a model labelling its own arithmetic `computed` would get an
+  inference promoted over a real measurement. The proposer's schema narrows the
+  enum to stated, observed and inferred; `pipeline.DIFF_SCHEMA` is untouched,
+  because it describes what a diff *is* rather than what a model may assert.
+* **The prompt is in code, not in `prompts/`.** CHAT-02 makes the persona a file
+  so voice can change without a deploy. This is not voice — changing it changes
+  what lands in long term memory, which should never move without a diff and a
+  test.
+
+Fixed while wiring it: `consolidation_job` never passed a timezone offset, so
+`pipeline.gather` fell back to its default of zero and windowed a **UTC** day. In
+Asia/Dubai that is four hours out — a message at 01:00 local was consolidated
+into the wrong day or not at all, which is exactly what TZ-01 exists to prevent.
+The offset is now taken for the day being consolidated rather than for today, so
+a DST boundary cannot shift the window either.
+
+### What is still not wired
 
 **Streaming to Telegram.** PERF-01 measures time to first token and the turn loop
 accepts an `on_text` callback, but the agent does not pass one — Telegram has no

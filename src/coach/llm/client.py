@@ -80,6 +80,7 @@ def _call(
     messages: Sequence[dict[str, Any]],
     tools: Sequence[dict[str, Any]] | None,
     on_text: Any | None,
+    tool_choice: dict[str, Any] | None = None,
 ) -> Completion:
     started = time.perf_counter()
 
@@ -94,6 +95,8 @@ def _call(
         kwargs["thinking"] = {"type": "adaptive"}
     if tools:
         kwargs["tools"] = list(tools)
+    if tool_choice is not None:
+        kwargs["tool_choice"] = tool_choice
 
     with client.messages.stream(**kwargs) as stream:
         if on_text is not None:
@@ -125,16 +128,22 @@ def complete(
     tools: Sequence[dict[str, Any]] | None = None,
     conn: psycopg.Connection | None = None,
     on_text: Any | None = None,
+    tool_choice: dict[str, Any] | None = None,
 ) -> Completion:
     """Run one model call, recording the route and its cost.
 
     MODEL-03: a failure on the configured model retries on the heavy model
     rather than failing the turn. Only the retry's route is reported as the one
     that served the call, with ``routed_from`` naming what was tried first.
+
+    `tool_choice` forces a named tool. Conversation leaves it unset — a coach
+    that must call a tool before it may speak is not a coach. Consolidation sets
+    it, because CONS-02's "strict JSON" is then a property of the call rather
+    than a hope about the prompt.
     """
     route = router.route(purpose)
     try:
-        completion = _call(client, route, system, messages, tools, on_text)
+        completion = _call(client, route, system, messages, tools, on_text, tool_choice)
     except (anthropic.APIStatusError, anthropic.APIConnectionError) as exc:
         fallback = router.fallback_for(route)
         if fallback is None:
@@ -143,7 +152,7 @@ def complete(
         log.warning(
             "model call failed on %s, falling back to %s: %s", route.model, fallback.model, exc
         )
-        completion = _call(client, fallback, system, messages, tools, on_text)
+        completion = _call(client, fallback, system, messages, tools, on_text, tool_choice)
         completion.routed_from = route.model
 
     _record(conn, completion)

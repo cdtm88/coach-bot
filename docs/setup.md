@@ -209,7 +209,7 @@ If the process is killed mid-ride, queued deliveries survive in the database and
 
 `coach-agent` is the conversation: a Telegram long poll, and one turn per backlog. It needs `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_CHAT_ID` and `ANTHROPIC_API_KEY`, and refuses to start without them rather than dying on your first message.
 
-`coach-scheduler` is the nightly work, on your local 03:00 rather than UTC. It runs confidence decay and the markdown fact export. **It does not yet run consolidation** — CONS-02's diff prompt has not been written — and it says so in a warning on startup rather than pretending. A night missed because the process was down runs when it comes back, which is why this is a loop rather than a cron entry.
+`coach-scheduler` is the nightly work, on your local 03:00 rather than UTC. Three jobs in order: consolidation, then confidence decay, then the markdown fact export. Consolidation reads the day that just finished — at 03:00 on Tuesday it consolidates Monday — and calls the model once, on the heavier tier. A night missed because the process was down runs when it comes back, which is why this is a loop rather than a cron entry. `COACH_TZ` decides which day that is; get it wrong and the pass windows the wrong hours.
 
 Run all three. Only `coach-ingest` needs the tunnel.
 
