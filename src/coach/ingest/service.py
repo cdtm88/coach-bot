@@ -66,6 +66,9 @@ class Handled:
     compliance: dict[str, Any] = field(default_factory=dict)
     review: str | None = None
     skipped: str = ""
+    # P09. Empty unless `adjust` was asked for and a rule fired.
+    adjusted: list[str] = field(default_factory=list)
+    deferred: list[str] = field(default_factory=list)
 
 
 def on_activity(
@@ -75,12 +78,22 @@ def on_activity(
     tz: ZoneInfo,
     write_note: Callable[[dict[str, Any]], str] = no_review,
     backfilled: bool = False,
+    adjust: bool = False,
+    now: datetime | None = None,
+    send: Callable[[str], None] | None = None,
 ) -> Handled:
-    """One activity, all the way through: parse, store, match, review.
+    """One activity, all the way through: parse, store, match, review, adjust.
 
     The order matters for PERF-03. The file fetch is the slow call, so it happens
     once and its result is reused; nothing here re-reads the activity it was
     handed.
+
+    `adjust` is off by default and P09's trigger rules only run when it is on.
+    That is not timidity: a backfill replaying two years of rides must not
+    restructure anything. ADJ-04 would reject each one for being outside the
+    current week, but the rules would still have run over history, and a backfill
+    is the one path where "would have been rejected anyway" is not good enough —
+    `backfilled` is passed separately and is checked here too.
     """
     activity_id = activity.get("id")
     file_bytes, streams = (None, None)
@@ -105,6 +118,16 @@ def on_activity(
     # review() returns None by itself for a backfilled session (FIT-09); the
     # check is not repeated here so the two cannot disagree.
     result.review = reviewmod.review(conn, ingested.session_id, write_note)
+
+    # ADJ-01: the rules run on ingest, after compliance is frozen — they read it,
+    # so the order is a dependency and not a preference.
+    if adjust and not backfilled and result.prescription_id is not None:
+        from coach.adjust import pass_ as adjustmod
+
+        outcome = adjustmod.run(conn, ingested.session_id, now or datetime.now(UTC), tz, send=send)
+        result.adjusted = [f"{a.trigger}:{a.action}" for a in outcome.applied]
+        result.deferred = list(outcome.deferred)
+
     return result
 
 

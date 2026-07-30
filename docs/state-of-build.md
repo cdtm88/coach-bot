@@ -3,7 +3,7 @@
 > Read this first in a new session. It says what is done, what is next, and what
 > the environment does that will otherwise waste your time.
 >
-> Last updated 30 July 2026, at `main` after PR #15, with P08 on a branch.
+> Last updated 30 July 2026, at `main` after PR #16, with P09 on a branch.
 > V1 and V4 have both been run against the live account.
 
 ## What is merged
@@ -24,19 +24,20 @@
 | P07 | Training blocks and gym programming (BLOCK, GYM, SAFE-04) | merged (PR #11) |
 | — | The runtime: `coach-agent`, `coach-scheduler`, OBS-07's stop (PR #12) | merged |
 | — | P02's proposer, so consolidation actually runs (CONS-02, PR #13) | merged |
-| P08 | Publishing upstream and athlete edit detection (PLAN-01 to PLAN-12) | built |
+| P08 | Publishing upstream and athlete edit detection (PLAN-01 to PLAN-12) | merged (PR #16) |
+| P09 | Bounded mid-week adjustment authority (ADJ-01 to ADJ-08) | built |
 
-588 tests, all against a real Postgres. Schema is at migration 012; the
+630 tests, all against a real Postgres. Schema is at migration 013; the
 scheduler's own ledger is created on first use rather than as a migration,
 because it is process bookkeeping rather than part of the memory design.
 
-**P00 to P08 are built and the runtime is wired.** P08 publishes prescriptions to
-the intervals.icu calendar, keeps them out of busy evenings, sweeps its own
-orphans nightly, and accepts the athlete's edits back into the local plan. It is
-the first phase that writes *upstream*.
+**P00 to P09 are built and the runtime is wired.** P08 publishes prescriptions to
+the intervals.icu calendar and accepts the athlete's edits back; P09 lets a
+session reshape the rest of that week, downward only.
 
-Next is **P09** onward in `docs/prd.md` section 4. Nothing is gated on a live
-check any more: V1 and V4 are both run and recorded below.
+Next is **P10** — the weekly review and the daily rhythm (REV, NOTIF, BREAK, NUT,
+LOG). Nothing is gated on a live check any more: V1 and V4 are both run and
+recorded below.
 
 Two soak gates are waiting on the athlete and neither blocks anything: HealthBridge
 writing body mass, and the secret iCal addresses in `CALENDAR_ICS_URLS`. Both
@@ -65,6 +66,47 @@ at each seam was simply nobody's phase. `src/coach/runtime/` is where it lives
 now, and it holds no opinions: every rule it applies — the interruption budget,
 the naturalness checks, the conflict matrix — already had a home, and this calls
 them in order.
+
+### P09: the asymmetry, in three modules
+
+ADJ-01 to ADJ-08. The split is the design rather than tidiness:
+
+* `adjust/triggers.py` — what the data says, and what it suggests. Knows nothing
+  about whether it is allowed.
+* `adjust/authority.py` — whether that may happen autonomously. Knows nothing
+  about cycling.
+* `adjust/apply.py` — doing it, recording it, and deciding whether to say so.
+
+A rule that approved its own change would make every mistake in a proposal a
+mistake in the training, and every new rule a fresh chance to get the bound
+wrong. So the bound is checked once, by code that has never heard of intervals,
+against GYM-08's combined load figure.
+
+**ADJ-02 is enforced by the vocabulary, not by a check.** A rule may ask for
+`shorten`, `ease`, `move_later`, `convert_to_rest` or `note` — there is no word
+for an increase, so a rule cannot propose one. The load comparison in
+`authority` is the belt behind that, and it rejects at *warning* level because a
+rule proposing an increase is a bug in the rule rather than a normal outcome.
+
+**Deferring is not failing.** ADJ-03 and ADJ-05 both send the proposal to the
+Sunday review, and `deferred_adjustments` is the table REV-04 will read. Only a
+load *increase* is rejected outright. Design section 10's reasoning for ADJ-05 is
+worth keeping in view: "repeated triggering means the block is wrong, which is a
+conversation, not a rule" — so the second trigger in a week becomes that
+conversation rather than being suppressed.
+
+**One thing this phase had to fix in an earlier one.** `review.attach` computed
+compliance and returned it without storing it, which was fine while the only
+reader was the review written in the same call. P09 cannot work that way: an
+`ease` **rewrites the target spec**, so recomputing compliance afterwards would
+compare the ride against the reduced target and the figure would improve every
+time the coach downgraded something — the rules would be reading a number their
+own actions had moved. `prescriptions.compliance` is now frozen at match time.
+
+`adjustment_events.authority` is new for the same class of reason: ADJ-05 counts
+autonomous restructures, and P08 writes to that table too. A PLAN-04 placement or
+an athlete's own edit is not the coach spending its authority, and counting them
+would silence the coach for a week because the athlete rescheduled something.
 
 ### P08, and the two live checks it needed
 

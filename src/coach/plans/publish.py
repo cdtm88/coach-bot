@@ -309,8 +309,9 @@ def _record(
             cur.execute(
                 """
                 insert into adjustment_events
-                    (prescription_id, trigger, evidence, before_spec, after_spec, announced)
-                values (%s, 'calendar_conflict', %s, %s, %s, false)
+                    (prescription_id, trigger, evidence, before_spec, after_spec, announced,
+                     authority)
+                values (%s, 'calendar_conflict', %s, %s, %s, false, 'calendar')
                 """,
                 (
                     row["id"],

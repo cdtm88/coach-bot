@@ -26,12 +26,12 @@ Fix the losing document in the same change (SPEC-02).
 
 ## Status
 
-**P00 to P08 are built, and the system runs.** The memory store and its
+**P00 to P09 are built, and the system runs.** The memory store and its
 invariants, the conversational agent, nightly consolidation, activity ingest with
 session reviews, macros from MacroLog with the body mass trend read from
 intervals.icu wellness, recovery deviation computed against the athlete's own
 baseline, the calendar feeds, and now four week training blocks with cycling and
-gym prescriptions behind a constraint gate. 588 tests, all against a real
+gym prescriptions behind a constraint gate. 630 tests, all against a real
 Postgres.
 
 The live checks that gated P04 were run on 28 July 2026 and the headline is that
@@ -41,13 +41,18 @@ this repository. So the trend pipeline is complete, tested and empty: every
 threshold is asserted on seeded data and the empty series is the first case in
 the suite, so the first real reading starts a trend with no code change.
 
-**P08 is built** — prescriptions publish to the intervals.icu calendar, keep out
-of busy evenings, get their orphans swept nightly, and the athlete's own edits are
-accepted back into the local plan. It is the first phase that writes *upstream*,
-and two live checks shaped it: a personal API key has no application identity, so
-the sweep keys on an `external_id` pattern rather than the documented
-`oauth_client_id`; and the workout-text repeat line must carry no leading dash, or
-a 3x set silently renders once. `docs/state-of-build.md` has both.
+**P08** publishes prescriptions to the intervals.icu calendar, keeps them out of
+busy evenings, sweeps its own orphans nightly, and accepts the athlete's own edits
+back into the local plan. Two live checks shaped it: a personal API key has no
+application identity, so the sweep keys on an `external_id` pattern rather than the
+documented `oauth_client_id`; and the workout-text repeat line must carry no
+leading dash, or a 3x set silently renders once. `docs/state-of-build.md` has both.
+
+**P09** lets a session reshape the rest of that week, and only downward.
+Shortening, easing and moving later happen on their own; adding load, adding
+sessions and raising intensity wait for the Sunday review. The rules propose, a
+separate module decides whether they may, and there is no word in the action
+vocabulary for an increase — so a rule cannot ask for one.
 
 Three processes run it: `coach-ingest` for every inbound feed, `coach-agent` for
 the conversation, `coach-scheduler` for the nightly jobs. Until recently only the
@@ -71,7 +76,7 @@ Later phases are in `docs/prd.md` section 4.
 ## Layout
 
 ```
-migrations/        numbered SQL, applied on boot (001 to 012)
+migrations/        numbered SQL, applied on boot (001 to 013)
 prompts/persona.md the coach's voice, written from docs/seed/
 seeds/athlete.json the initial facts, each traced to the source transcript
 scripts/
@@ -137,6 +142,11 @@ src/coach/
     publish.py     the upsert, and never into busy time (PLAN-01, PLAN-04)
     sweep.py       nightly orphan removal; the only thing that deletes (PLAN-05)
     sync.py        the athlete's own edits, back into the plan (PLAN-06, PLAN-12)
+  adjust/          P09: what a session does to the rest of the week
+    triggers.py    the fixed rule set; proposes, decides nothing (ADJ-01)
+    authority.py   the bounds: reduce only, this week, once (ADJ-02/04/05/08)
+    apply.py       the change, the record, and the 12h notice (ADJ-06/07)
+    pass_.py       the entry point ingest calls
   runtime/         the wiring: what makes the phases into running processes
     models.py      the only place an Anthropic client is built, and the spend guard
     transport.py   the only place that talks to Telegram
