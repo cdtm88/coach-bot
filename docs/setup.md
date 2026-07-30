@@ -213,12 +213,44 @@ If the process is killed mid-ride, queued deliveries survive in the database and
 
 Run all three. Only `coach-ingest` needs the tunnel.
 
+#### Under compose
+
+`docker-compose.yml` defines all five services. Bring the stack up with:
+
+```bash
+docker compose up -d              # postgres, migrate, agent, scheduler, ingest
+docker compose --profile tunnel up -d   # ...and cloudflared
+```
+
+The tunnel is behind a profile because it is the only service that makes anything reachable from outside. Without it the stack runs complete and unreachable, which is the right default for a first boot and for any machine where MacroLog is not configured yet.
+
+Compose reads `.env` beside the file and hands each service only the variables it actually reads, so a leaked environment in one process is not a leaked environment in all three. Five have no default and fail at `up` with a message naming them rather than starting something broken: `POSTGRES_PASSWORD`, `COACH_TZ`, `ANTHROPIC_API_KEY`, `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_CHAT_ID`, plus `MACRO_INGEST_SECRET`. `COACH_TZ` is on that list deliberately: unset, the code falls back to UTC and *nothing errors* — every day and week boundary is simply computed in the wrong zone, and the nightly pass reports success while windowing the wrong hours.
+
+Do not set `DATABASE_URL` for the compose path. Compose derives it from `POSTGRES_PASSWORD`, and the two disagreeing is a confusing way to fail.
+
+**Three host paths need to be writable by uid 10001**, which is what the containers run as. Create them before the first `up`:
+
+```bash
+mkdir -p var/fit-archive var/fit-inbox backups
+sudo chown -R 10001 var/fit-archive var/fit-inbox backups
+```
+
+Skip it and the failure arrives at the first activity rather than at boot, which is the worst time to learn about it. `COACH_FIT_ARCHIVE` and `COACH_FIT_WATCH` are host paths in the compose file, not container paths — point the archive at storage you back up.
+
+The database has no `ports` stanza and is unreachable from the host by design (SEC-05). For a psql prompt: `docker compose exec postgres psql -U coach -d coach`.
+
+The seed is a one-off rather than a service, since it runs once and is a decision rather than a job:
+
+```bash
+docker compose run --rm agent coach-seed --file /app/seeds/athlete.json
+```
+
 #### Daily, automatic
 
 * Zwift rides arrive through the watched folder within seconds of the file syncing. Everything else arrives on the poll, by default within two minutes. A session review follows either way, inside the five minute budget.
 * MacroLog posts macros as you log meals, and body mass to intervals.icu wellness; the coach reads wellness back hourly (`COACH_WELLNESS_INTERVAL_S`) and re-reading is free, so a late provider fill-in is picked up regardless.
 * Calendar feeds fetch every six hours; planned sessions publish to intervals.icu on block change.
-* Decay and the fact export run at 03:00 local. Consolidation, the recall suite and the linter are not wired yet — see `docs/state-of-build.md`.
+* Consolidation, decay and the fact export run at 03:00 local, in that order. The recall suite and the contradiction linter are not wired yet — see `docs/state-of-build.md`.
 
 #### Weekly, yours
 
