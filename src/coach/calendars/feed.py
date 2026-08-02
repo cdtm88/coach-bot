@@ -169,7 +169,22 @@ def configured_urls() -> list[str]:
     write-only: it goes into an HTTP client and nowhere else.
     """
     raw = os.environ.get("CALENDAR_ICS_URLS", "")
-    return [url.strip() for url in raw.split(",") if url.strip()]
+    return [_https(url.strip()) for url in raw.split(",") if url.strip()]
+
+
+def _https(url: str) -> str:
+    """`webcal://` is `https://` with a scheme that tells the OS to subscribe.
+
+    Every calendar app hands out the webcal form — iCloud's "Public Calendar"
+    share gives nothing else — and httpx refuses it as an unsupported protocol,
+    which surfaced as `UnsupportedProtocol` and no calendar. Rewritten here
+    rather than at the fetch so the feed's identity is the same whichever form
+    was pasted; keyed on the raw string, one calendar would be two feeds.
+    """
+    for scheme in ("webcal://", "webcals://"):
+        if url.lower().startswith(scheme):
+            return "https://" + url[len(scheme) :]
+    return url
 
 
 def fingerprint(url: str) -> str:
@@ -230,6 +245,7 @@ def fetch(
             # includes the request URL, which is the secret.
             raise FeedError(f"{name}: HTTP {response.status_code}")
         body = response.content
+        content_type = (response.headers.get("content-type") or "unknown").split(";")[0].strip()
     except FeedError as exc:
         return Fetched(feed=identity, name=name, error=str(exc))
     except httpx.HTTPError as exc:
@@ -248,9 +264,19 @@ def fetch(
             occurrences=expand(parsed, tz, today, horizon_days),
         )
     except Exception as exc:  # noqa: BLE001 - one malformed feed must not stop the rest
-        return Fetched(
-            feed=identity, name=name, error=f"{name}: could not parse ({type(exc).__name__})"
-        )
+        # The content type, and a plain sentence when the answer was a web page.
+        # "could not parse (ValueError)" is true and unactionable: the live
+        # failure was an `accounts.google.com` sign-in page served with HTTP 200,
+        # because Google's share menu offers four addresses and only one of them
+        # is the iCal one. Neither the type nor that sentence is derived from the
+        # URL, so CALR-06 still holds.
+        detail = f"{type(exc).__name__}; served {content_type}"
+        if "html" in content_type:
+            detail += (
+                " — that address returns a web page, not a calendar. Use the "
+                "secret address in iCal format, which ends in .ics"
+            )
+        return Fetched(feed=identity, name=name, error=f"{name}: could not parse ({detail})")
 
 
 def window(
@@ -449,7 +475,16 @@ def store(
 def record_fetch(
     conn: psycopg.Connection, feed: str, ok: bool, events: int, error: str | None
 ) -> None:
-    """CALR-02's history, and the per-feed state behind it."""
+    """CALR-02's history, and the per-feed state behind it.
+
+    `feed` is the id, which is what both statements key on. The update used to
+    say `where name = %s`, and a name is what a feed is *called* — read from the
+    document's X-WR-CALNAME, or `calendar-N` when the fetch failed and there was
+    no document to read. The id is a hash of the URL. They agree essentially
+    never, so `last_fetch_at`, `last_success_at` and `last_error` were never
+    written for any feed, and the one table that exists to say what happened to a
+    calendar was permanently blank while the history table beside it filled up.
+    """
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "insert into calendar_fetches (feed, ok, events, error) values (%s, %s, %s, %s)",
@@ -461,7 +496,7 @@ def record_fetch(
                 last_fetch_at = now(),
                 last_success_at = case when %s then now() else last_success_at end,
                 last_error = %s
-             where name = %s
+             where id = %s
             """,
             (ok, error, feed),
         )
