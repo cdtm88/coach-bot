@@ -485,6 +485,36 @@ def test_golf_produces_a_session_and_no_power_analysis(conn: psycopg.Connection)
     assert row["np_power_w"] is None
 
 
+def test_an_outdoor_gravel_ride_keeps_its_power(conn: psycopg.Connection) -> None:
+    """FIT-08 says a Garmin ride ingests the same as a Zwift one. It did not.
+
+    Power analysis was an allowlist of `ride` and `virtualride`, so every other
+    spelling of riding had its power nulled at ingest and could never be quoted.
+    The same shape as the virtualride matching bug, one layer up: the equivalence
+    group knew all six names and the power set knew two.
+    """
+    result = activities.ingest(
+        conn, activity("i4004", kind="GravelRide"), DUBAI, file_bytes=ride_fit()
+    )
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute(
+            "select discipline, avg_power_w, np_power_w from sessions where id = %s",
+            (result.session_id,),
+        )
+        row = cur.fetchone()
+    assert row["discipline"] == "gravelride"
+    assert float(row["avg_power_w"]) == 150.0
+    assert row["np_power_w"] is not None
+
+
+def test_the_power_set_and_the_cycling_group_are_the_same_names() -> None:
+    """Written out twice, they drifted. Now one is built from the other."""
+    assert set(review.equivalents("ride")) == set(activities.POWER_DISCIPLINES)
+    for name in activities.POWER_DISCIPLINES:
+        assert activities.uses_power_analysis(name), name
+
+
 def test_a_non_zwift_activity_takes_the_same_path(conn: psycopg.Connection) -> None:
     """FIT-08: outdoor and any connected device produce an equivalent row."""
     outdoor = activities.ingest(
@@ -588,6 +618,89 @@ def test_a_locally_dropped_file_ingests_without_upstream(
     assert row["source"] == "local_file"
     assert float(row["avg_power_w"]) == 150.0
     assert row["external_ref"] is None, "nothing upstream was consulted"
+
+
+def test_a_dropped_file_is_typed_from_its_own_sport(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    """FIT-14 has no platform to ask, but the file says what it is.
+
+    Every watched-folder file used to be called a ride. Almost always right, and
+    wrong in the way that matters: under FIT-07 the difference between a golf
+    round and a ride is the difference between an activity logged and an activity
+    given power figures and scored for compliance.
+    """
+    cases = {
+        "zwift.fit": (("cycling", "virtual_activity"), "virtualride", "VirtualRide"),
+        "outdoor.fit": (("cycling", None), "ride", "Ride"),
+        "parkrun.fit": (("running", None), "run", "Run"),
+        "gym.fit": (("training", "strength_training"), "weighttraining", "WeightTraining"),
+        "golf.fit": (("golf", None), "golf", "Golf"),
+    }
+    for index, (filename, ((sport, sub), discipline, kind)) in enumerate(cases.items()):
+        path = tmp_path / filename
+        path.write_bytes(
+            build_fit(
+                START + timedelta(days=index),
+                power=[100] * 120,
+                heart_rate=[130] * 120,
+                sport=sport,
+                sub_sport=sub,
+            )
+        )
+        session_id = archive.ingest_file(conn, path, DUBAI)
+        conn.commit()
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "select discipline, activity_type, avg_power_w from sessions where id = %s",
+                (session_id,),
+            )
+            row = cur.fetchone()
+        assert row["discipline"] == discipline, filename
+        assert row["activity_type"] == kind, filename
+        # FIT-07 follows from the type, which is the whole point of reading it.
+        expected_power = discipline in ("ride", "virtualride")
+        assert (row["avg_power_w"] is not None) is expected_power, filename
+
+
+def test_a_sport_the_map_does_not_know_is_not_called_a_ride(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    """An unmapped sport fails to match rather than matching everything.
+
+    The same direction `review.equivalents` takes with an unknown discipline, and
+    for the same reason.
+    """
+    path = tmp_path / "tennis.fit"
+    path.write_bytes(build_fit(START, heart_rate=[130] * 120, sport="tennis"))
+    session_id = archive.ingest_file(conn, path, DUBAI)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("select discipline from sessions where id = %s", (session_id,))
+        assert cur.fetchone()["discipline"] == "other"
+
+
+def test_a_file_that_declares_no_sport_keeps_the_documented_default(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    """The one branch that is still a guess, so it stays visible and narrow.
+
+    Every device writes a sport message. 'Other' would be more cautious and would
+    cost a real ride its power analysis, so the fallback is the watched folder's
+    own prior: it is fed by a bike.
+    """
+    path = tmp_path / "silent.fit"
+    path.write_bytes(ride_fit())  # no sport message at all
+    session_id = archive.ingest_file(conn, path, DUBAI)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("select discipline, avg_power_w from sessions where id = %s", (session_id,))
+        row = cur.fetchone()
+    assert row["discipline"] == activities.discipline_of({"type": activities.UNDECLARED_LOCAL_TYPE})
+    assert float(row["avg_power_w"]) == 150.0
 
 
 def test_scanning_the_folder_is_idempotent(conn: psycopg.Connection, tmp_path: Path) -> None:

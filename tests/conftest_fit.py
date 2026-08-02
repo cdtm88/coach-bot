@@ -27,10 +27,19 @@ def build_fit(
     cadence: list[int] | None = None,
     altitude: list[float] | None = None,
     distance_step_m: float = 8.0,
+    sport: str | None = None,
+    sub_sport: str | None = None,
 ) -> bytes:
-    """A FIT file with one record message per second."""
+    """A FIT file with one record message per second.
+
+    `sport` is optional because a file that declares none is its own case: the
+    watched folder path has to decide what to call it, and the fixtures that
+    predate the sport message go on exercising that branch by leaving it off.
+    """
     from fit_tool.fit_file_builder import FitFileBuilder
     from fit_tool.profile.messages.record_message import RecordMessage
+    from fit_tool.profile.messages.sport_message import SportMessage
+    from fit_tool.profile.profile_type import Sport, SubSport
 
     n = max(len(power or []), len(heart_rate or []), len(cadence or []), len(altitude or []))
     if n == 0:
@@ -38,6 +47,13 @@ def build_fit(
 
     builder = FitFileBuilder(auto_define=True)
     base_ms = int(start.timestamp() * 1000)
+
+    if sport is not None:
+        message = SportMessage()
+        message.sport = Sport[sport.upper()]
+        if sub_sport is not None:
+            message.sub_sport = SubSport[sub_sport.upper()]
+        builder.add(message)
 
     for i in range(n):
         record = RecordMessage()

@@ -78,18 +78,26 @@ def keep_original(
     nothing: the poll fetched the bytes to parse them and dropped them on the
     floor, and the archive that exists because upstream can delete its own data
     held only the files that arrived through the watched folder.
+
+    Stored decompressed. intervals.icu serves the original gzipped, so the file
+    written under `<id>.fit` was a gzip stream wearing a FIT extension — and
+    FIT-16 reads these back out and posts them to the upload endpoint, where the
+    name is what says how to read the bytes. `size_bytes` was the compressed
+    length against a hash of the uncompressed content, which is two answers to
+    one question.
     """
+    canonical = parse.decompressed(data)
     folder = archive_folder()
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{activity_id}.fit"
     if not path.exists():
-        path.write_bytes(data)
-    register(conn, path, data)
+        path.write_bytes(canonical)
+    register(conn, path, canonical)
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "update fit_archive set session_id = coalesce(session_id, %s), "
             "external_ref = coalesce(external_ref, %s) where sha256 = %s",
-            (session_id, activity_id, parse.content_hash(data)),
+            (session_id, activity_id, parse.content_hash(canonical)),
         )
 
 
@@ -117,6 +125,15 @@ def ingest_file(
         log.warning("skipping %s: no timestamps, so FIT-10 cannot date it", path)
         return None
 
+    # The file's own sport, which is the only thing here that knows. Falling back
+    # to a ride only when the file never says, and saying so, because that branch
+    # is a guess and a guess should be visible in the log rather than in the data
+    # alone.
+    kind = actmod.type_of_file(parsed)
+    if kind is None:
+        kind = actmod.UNDECLARED_LOCAL_TYPE
+        log.info("%s declares no sport; ingesting it as %s", path, kind)
+
     # Synthesised to match what the upstream path builds, so both routes converge
     # on one ingest function rather than two that drift.
     #
@@ -125,7 +142,7 @@ def ingest_file(
     # not a correction to the title the platform gave the ride.
     synthetic = {
         "id": None,
-        "type": "Ride",
+        "type": kind,
         "start_date_local": parsed.started_at.isoformat(),
     }
     result = actmod.ingest(

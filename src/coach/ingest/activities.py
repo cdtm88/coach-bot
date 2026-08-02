@@ -23,7 +23,16 @@ log = logging.getLogger(__name__)
 
 # FIT-07: power based analysis applies to riding. Everything else is logged as
 # activity only, so a golf round never acquires a compliance calculation.
-POWER_DISCIPLINES = frozenset({"ride", "virtualride"})
+#
+# Every name for riding, not two of them. FIT-07 names golf and gym as the
+# exclusions and FIT-08 says an outdoor ride ingests the same as a Zwift one, so
+# an allowlist of `ride` and `virtualride` was the #27 bug over again one layer
+# up: a gravel ride off a Garmin had its power figures nulled at ingest and could
+# never be quoted, because the platform calls it `GravelRide`. `review` builds
+# its cycling equivalence group from this set so the two cannot drift.
+POWER_DISCIPLINES = frozenset(
+    {"ride", "virtualride", "gravelride", "mountainbikeride", "ebikeride", "cycling"}
+)
 
 # FIT-17: activities this coach wrote upstream carry this in their external_id,
 # so the one that comes back through the webhook matches the local row instead of
@@ -50,6 +59,69 @@ def discipline_of(activity: dict[str, Any]) -> str:
 
 def uses_power_analysis(discipline: str) -> bool:
     return discipline in POWER_DISCIPLINES
+
+
+# FIT's own sport vocabulary, mapped onto the platform's activity types so that
+# both ingest paths produce one set of names. Refined by sub sport where the
+# distinction is one this system acts on — an indoor ride and an outdoor one are
+# the same discipline group but not the same session, and the athlete's are all
+# indoor.
+FIT_SUB_SPORT_TYPES = {
+    ("cycling", "virtual_activity"): "VirtualRide",
+    ("cycling", "indoor_cycling"): "VirtualRide",
+    ("cycling", "spin"): "VirtualRide",
+    ("cycling", "gravel_cycling"): "GravelRide",
+    ("cycling", "mountain"): "MountainBikeRide",
+    ("cycling", "cyclocross"): "MountainBikeRide",
+    ("running", "treadmill"): "VirtualRun",
+    ("running", "indoor_running"): "VirtualRun",
+    ("running", "virtual_activity"): "VirtualRun",
+    ("running", "trail"): "TrailRun",
+    ("swimming", "open_water"): "OpenWaterSwim",
+    ("training", "strength_training"): "WeightTraining",
+    ("fitness_equipment", "strength_training"): "WeightTraining",
+    ("fitness_equipment", "indoor_cycling"): "VirtualRide",
+    ("fitness_equipment", "indoor_rowing"): "Rowing",
+    ("fitness_equipment", "treadmill"): "VirtualRun",
+}
+
+FIT_SPORT_TYPES = {
+    "cycling": "Ride",
+    "e_biking": "EBikeRide",
+    "running": "Run",
+    "swimming": "Swim",
+    "walking": "Walk",
+    "hiking": "Hike",
+    "rowing": "Rowing",
+    "golf": "Golf",
+    "training": "Workout",
+    "fitness_equipment": "Workout",
+}
+
+# What a file that never says gets called. The watched folder is fed by a bike,
+# and a FIT file with no sport message is close to a fiction — every device
+# writes one — but the fallback has to be something and 'Other' would cost a
+# real ride its power analysis under FIT-07.
+UNDECLARED_LOCAL_TYPE = "Ride"
+
+
+def type_of_file(parsed: parse.Parsed) -> str | None:
+    """The platform's name for what a FIT file says it is, or None if it is silent.
+
+    FIT-14's path has no platform to ask, so before this it called every file a
+    ride. That is right almost always and wrong in the way that matters: a golf
+    round or a gym session dropped in the watched folder became a ride, which
+    under FIT-07 is the difference between an activity logged and an activity
+    scored for compliance.
+
+    A sport this map does not know returns 'Other' rather than a guess. It fails
+    to match anything downstream, which is the safe direction — the same reason
+    `review.equivalents` leaves an unknown discipline matching only itself.
+    """
+    if not parsed.sport:
+        return None
+    refined = FIT_SUB_SPORT_TYPES.get((parsed.sport, parsed.sub_sport or ""))
+    return refined or FIT_SPORT_TYPES.get(parsed.sport, "Other")
 
 
 def derived_fields(activity: dict[str, Any]) -> dict[str, Any]:

@@ -49,8 +49,24 @@ class Parsed:
     max_hr: int | None = None
     avg_cadence: float | None = None
     sample_count: int = 0
+    # What the file says it is, in FIT's own vocabulary ('cycling',
+    # 'virtual_activity'). Not a value computed from samples, but the file's own
+    # statement about itself, and the only thing a watched folder ingest has to
+    # go on when there is no platform to ask.
+    sport: str | None = None
+    sub_sport: str | None = None
     source_kind: str = "unknown"
     warnings: list[str] = field(default_factory=list)
+
+
+def _enum_name(raw: object) -> str | None:
+    """A FIT enum as its name, or None if the file left it unset.
+
+    fitdecode resolves a known enum to its name and leaves an unknown one as the
+    raw integer. An integer is not a sport, so it reads as absent rather than as
+    a value nothing can interpret.
+    """
+    return raw.strip().lower() or None if isinstance(raw, str) else None
 
 
 def _mean(values: list[float]) -> float | None:
@@ -155,17 +171,28 @@ def from_fit(data: bytes) -> Parsed:
     distance_m: float | None = None
     elevation_gain = 0.0
     last_altitude: float | None = None
+    sport: str | None = None
+    sub_sport: str | None = None
 
     try:
         with fitdecode.FitReader(io.BytesIO(data)) as reader:
             for frame in reader:
                 if frame.frame_type != fitdecode.FIT_FRAME_DATA:
                     continue
-                if frame.name != "record":
-                    continue
 
                 def value(name: str, f: object = frame) -> object:
                     return f.get_value(name) if f.has_field(name) else None  # type: ignore[attr-defined]
+
+                # The `sport` message carries it, and so does `session`. Taking
+                # the first that appears rather than the last: a multisport file
+                # would otherwise be named by whichever leg finished, and its
+                # first leg is at least a leg it actually contains.
+                if frame.name in ("sport", "session"):
+                    sport = sport or _enum_name(value("sport"))
+                    sub_sport = sub_sport or _enum_name(value("sub_sport"))
+
+                if frame.name != "record":
+                    continue
 
                 ts = value("timestamp")
                 if isinstance(ts, datetime):
@@ -198,7 +225,7 @@ def from_fit(data: bytes) -> Parsed:
     if started_at and last_timestamp:
         duration = int((last_timestamp - started_at).total_seconds())
 
-    return _summarise(
+    parsed = _summarise(
         power,
         hr,
         cadence,
@@ -208,6 +235,8 @@ def from_fit(data: bytes) -> Parsed:
         duration,
         "fit",
     )
+    parsed.sport, parsed.sub_sport = sport, sub_sport
+    return parsed
 
 
 def from_streams(streams: list[dict], started_at: datetime | None = None) -> Parsed:
