@@ -79,7 +79,7 @@ now, and it holds no opinions: every rule it applies — the interruption budget
 the naturalness checks, the conflict matrix — already had a home, and this calls
 them in order.
 
-### P11: six containers, and how many of them should exist
+### P14: six containers, and how many of them should exist
 
 Deployed, the stack is six containers: `coach-db`, `coach-db-backup`,
 `coach-migrate`, `coach-agent`, `coach-ingest`, `coach-scheduler`. For a

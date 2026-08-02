@@ -97,6 +97,22 @@ Single user. Cycling primary, gym programmed against movement constraints, gym a
 | CHAT-10 | Responses are plain conversational text suitable for a phone, without headers or bullet dumps unless asked. | Median response under 120 words. |
 | CHAT-11 | A conversation carries at most one interruption, meaning one item the coach raises that the athlete did not. Priority order: safety confirmation, outlier confirmation (HLTH-11), body mass gap mention (HLTH-15), pending mention (design section 8), verification candidate (CONS-08). Feed staleness (CHAT-09) shapes the agent's reasoning and is never itself an interruption. The Sunday review is exempt; its single question is governed by REV-03. | A conversation qualifying for four interruptions carries exactly one, the highest priority. Counted across the conversation, not per category. |
 
+### Media
+
+Telegram accepts a photo or a document as readily as a sentence, and until now the
+bot recognised neither. An unhandled type was dropped silently, which is
+indistinguishable from the bot being down.
+
+| ID | Requirement | Acceptance |
+| --- | --- | --- |
+| MEDIA-01 | Any message type the coach cannot yet act on is acknowledged rather than dropped. | Sending a sticker produces a reply saying so, not silence. |
+| MEDIA-02 | Photographs are read and discussed. A screenshot of a training week, a food label, a gym machine. | A photo of a nutrition label produces a discussion of it in the same turn. |
+| MEDIA-03 | Anything read from an image is provenance `stated`, never `measured` or `computed`. A screenshot is a claim about a number, not the number. | A figure taken from an image never reaches a rollup and never supersedes a measured fact. |
+| MEDIA-04 | A `.fit` file sent in chat is ingested through the FIT-14 path, identically to one dropped in the watched folder. | A file sent in Telegram becomes a session with the same content hash it would have had from the folder. |
+| MEDIA-05 | Files are size capped and type checked before download, and a rejection says which. | A 40 MB video is refused by size and named as such, without downloading it. |
+| MEDIA-06 | Downloaded media is retained under the same rule as its kind: FIT files to the FIT-15 archive, images not retained beyond the turn. | An image is absent from disk after the conversation; a FIT file is in the archive. |
+| MEDIA-07 | An image costs a model call at the higher token weight, so the OBS-07 spend cap counts it before the call rather than after. | A photo sent while at the daily cap is refused with the reason, and no call is made. |
+
 ### Safety
 
 | ID | Requirement | Acceptance |
@@ -400,6 +416,7 @@ Completion is split in two. **Implemented when** is a test gate: it passes on se
 | --- | --- | --- | --- | --- |
 | P11 | Accept voice notes as a first class input. | VOICE-01 to VOICE-03 | A 60 second note transcribes and answers inside the budget, and a simulated failure replies rather than dropping silently. | Post ride voice note produces a session discussion without typing. |
 | P12 | Prove the system remembers correctly and know what it costs. | OBS-01 to OBS-09, PERF-01 to PERF-03 | Recall suite passes 100 percent on seeded data, daily cost is queryable by purpose, the spend cap halts and explains, an oversized context is rejected pre-flight. | Recall suite passes 100 percent for fourteen consecutive nights and the performance budgets hold over their stated sample sizes. |
+| P13 | Accept images and files in the chat. | MEDIA-01 to MEDIA-07 | A photo is discussed in the turn it arrives, a `.fit` file sent in chat becomes a session, and an unsupported type is refused rather than dropped. | A screenshot and a FIT file both handled without leaving Telegram. |
 
 ## 5. Open items
 
