@@ -91,6 +91,19 @@ jobs:
             test -f /app/seeds/athlete.json &&
             test "$(ls /app/migrations/*.sql | wc -l)" -ge 13'
 
+      # Present on disk is not the same as reachable by the code that reads it.
+      # `migrate` resolved its directory relative to the source tree, so in the
+      # image it globbed an empty path, applied nothing, and reported "schema up
+      # to date" against an empty database.
+      - name: The code can actually find that data
+        run: |
+          docker run --rm coach-bot:ci python -c "
+          from coach.migrate import discover
+          from coach.agent.persona import load
+          found = discover()
+          assert len(found) >= 13, found
+          assert load(), 'persona is empty'"
+
       - name: It does not run as root
         run: |
           test "$(docker run --rm coach-bot:ci id -u)" = 10001
