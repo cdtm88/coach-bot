@@ -514,8 +514,9 @@ def sync(
     One feed failing does not stop the others: a work calendar being briefly
     unreachable must not lose the coach its view of the athlete's evenings.
     """
+    urls = configured_urls()
     results = []
-    for position, url in enumerate(configured_urls()):
+    for position, url in enumerate(urls):
         result = fetch(url, position, tz, today, horizon_days, client)
         register(conn, url, result.name, position)
         # A failed fetch stores nothing and deletes nothing. Treating an outage
@@ -530,8 +531,42 @@ def sync(
             log.warning("calendar feed %s failed: %s", result.name, result.error)
         results.append(result)
 
+    removed = prune(conn, [feed_id(url) for url in urls])
+    if removed:
+        log.info("removed %d calendar feed(s) no longer configured", removed)
+
     _record_feed_health(conn, results)
     return results
+
+
+def prune(conn: psycopg.Connection, keep: list[str]) -> int:
+    """Forget feeds that are no longer configured, and the busy time they published.
+
+    Nothing used to remove a feed when its URL left `CALENDAR_ICS_URLS`. The row
+    stayed, and so did its occurrences — and `store` only ever refreshes feeds
+    that are still configured, so those occurrences were never revisited and
+    never expired. Swap one calendar for another and PLAN-04 keeps scheduling
+    around meetings from a calendar the athlete no longer subscribes to, for
+    ever, with nothing in the system able to say where they came from.
+
+    **An empty configuration prunes nothing.** That is the same rule the fetch
+    already follows — "a failed fetch stores nothing and deletes nothing" —
+    applied one level up. A compose file that loses the variable, an `.env` that
+    fails to load, a typo in the name: each of those reads as zero configured
+    feeds, and treating that as "the athlete unsubscribed from everything" would
+    delete every calendar he has on a configuration slip. Stale busy time is a
+    recoverable annoyance; silently discarding the lot is not.
+
+    Cascades to `calendar_events` and `calendar_fetches`, which is CALR-02's
+    history for a feed that no longer exists. Losing it is the point rather than
+    a cost: the feed is gone, and history for a feed nothing can name again is
+    the sort of orphan this function exists to remove.
+    """
+    if not keep:
+        return 0
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("delete from calendar_feeds where not (id = any(%s))", (keep,))
+        return cur.rowcount
 
 
 def _record_feed_health(conn: psycopg.Connection, results: list[Fetched]) -> None:
