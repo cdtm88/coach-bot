@@ -241,78 +241,152 @@ def ingest(
     if session_id is None and is_coach_authored(activity):
         session_id = match_coach_authored(conn, activity, started_at)
 
-    upstream_name = name_of(activity)
-    stem = _blank_is_absent(fallback_name)
+    derived = derived_fields(activity)
 
-    # Split around the name because the two statements disagree about it, and
-    # only about it: an insert takes the best name available, an update takes the
-    # upstream one or keeps what is already there.
-    head = (
-        external_ref,
-        hash_,
-        source,
-        discipline,
-        activity.get("type"),
-    )
-    tail = (
-        started_at,
-        local_date,
-        parsed.duration_s or activity.get("moving_time") or activity.get("elapsed_time"),
-        parsed.distance_m if parsed.distance_m is not None else activity.get("distance"),
-        parsed.elevation_m
+    values: dict[str, Any] = {
+        "external_ref": external_ref,
+        "content_hash": hash_,
+        "source": source,
+        "discipline": discipline,
+        "activity_type": activity.get("type"),
+        # The insert takes the best name available; the update prefers upstream's
+        # and keeps what is already there rather than falling to the stem.
+        "name": name_of(activity) or _blank_is_absent(fallback_name),
+        "upstream_name": name_of(activity),
+        "stem": _blank_is_absent(fallback_name),
+        "started_at": started_at,
+        "local_date": local_date,
+        "duration_s": parsed.duration_s
+        or activity.get("moving_time")
+        or activity.get("elapsed_time"),
+        "distance_m": parsed.distance_m
+        if parsed.distance_m is not None
+        else activity.get("distance"),
+        "elevation_m": parsed.elevation_m
         if parsed.elevation_m is not None
         else activity.get("total_elevation_gain"),
-        parsed.avg_power_w,
-        parsed.np_power_w,
-        parsed.max_power_w,
-        parsed.avg_hr,
-        parsed.max_hr,
-        parsed.avg_cadence,
-        parsed.sample_count,
-        Jsonb(derived_fields(activity)),
-        analyzed,
-        analyzed is None,
-        is_coach_authored(activity),
-        backfilled,
+        "avg_power_w": parsed.avg_power_w,
+        "np_power_w": parsed.np_power_w,
+        "max_power_w": parsed.max_power_w,
+        "avg_hr": parsed.avg_hr,
+        "max_hr": parsed.max_hr,
+        "avg_cadence": parsed.avg_cadence,
+        "sample_count": parsed.sample_count,
+        "derived": Jsonb(derived),
+        "analyzed_at": analyzed,
+        "derived_provisional": analyzed is None,
+        "coach_authored": is_coach_authored(activity),
+        "backfilled": backfilled,
         # PLAN-07: the platform's own link from this activity to the planned event
         # it satisfied. Better evidence than date and discipline when present, and
         # absent for anything that had no planned workout — which is most rides.
-        paired_event_id_of(activity),
-    )
+        "paired_event_id": paired_event_id_of(activity),
+        "session_id": session_id,
+    }
 
     with conn.transaction(), conn.cursor() as cur:
         if session_id is not None:
-            cur.execute(
-                """
-                update sessions set
-                    external_ref = coalesce(%s, external_ref),
-                    content_hash = coalesce(%s, content_hash),
-                    source = %s, discipline = %s, activity_type = %s,
-                    name = coalesce(%s, name, %s),
-                    started_at = %s, local_date = %s, duration_s = %s, distance_m = %s,
-                    elevation_m = %s, avg_power_w = %s, np_power_w = %s, max_power_w = %s,
-                    avg_hr = %s, max_hr = %s, avg_cadence = %s, sample_count = %s,
-                    derived = %s, analyzed_at = %s, derived_provisional = %s,
-                    coach_authored = %s, backfilled = %s,
-                    paired_event_id = coalesce(%s, paired_event_id)
-                where id = %s
-                """,
-                (*head, upstream_name, stem, *tail, session_id),
-            )
+            cur.execute(update_statement(parsed, discipline, derived), values)
             return Ingested(session_id, created=False, reason="matched an existing session")
 
-        cur.execute(
-            """
-            insert into sessions
-                (external_ref, content_hash, source, discipline, activity_type, name,
-                 started_at, local_date, duration_s, distance_m, elevation_m,
-                 avg_power_w, np_power_w, max_power_w, avg_hr, max_hr, avg_cadence,
-                 sample_count, derived, analyzed_at, derived_provisional,
-                 coach_authored, backfilled, paired_event_id)
-            values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s)
-            returning id
-            """,
-            (*head, upstream_name or stem, *tail),
-        )
+        cur.execute(INSERT, values)
         return Ingested(cur.fetchone()["id"], created=True)
+
+
+# Computed from samples this call read, and from nothing else. `duration_s`,
+# `distance_m` and `elevation_m` are not here: they fall back to the activity's
+# own fields, so a call with no file still has something true to say about them.
+SAMPLE_COLUMNS = (
+    "avg_power_w",
+    "np_power_w",
+    "max_power_w",
+    "avg_hr",
+    "max_hr",
+    "avg_cadence",
+    "sample_count",
+)
+
+POWER_COLUMNS = ("avg_power_w", "np_power_w", "max_power_w")
+
+INSERT = """
+    insert into sessions
+        (external_ref, content_hash, source, discipline, activity_type, name,
+         started_at, local_date, duration_s, distance_m, elevation_m,
+         avg_power_w, np_power_w, max_power_w, avg_hr, max_hr, avg_cadence,
+         sample_count, derived, analyzed_at, derived_provisional,
+         coach_authored, backfilled, paired_event_id)
+    values
+        (%(external_ref)s, %(content_hash)s, %(source)s, %(discipline)s,
+         %(activity_type)s, %(name)s, %(started_at)s, %(local_date)s, %(duration_s)s,
+         %(distance_m)s, %(elevation_m)s, %(avg_power_w)s, %(np_power_w)s,
+         %(max_power_w)s, %(avg_hr)s, %(max_hr)s, %(avg_cadence)s, %(sample_count)s,
+         %(derived)s, %(analyzed_at)s, %(derived_provisional)s, %(coach_authored)s,
+         %(backfilled)s, %(paired_event_id)s)
+    returning id
+"""
+
+
+def update_statement(parsed: parse.Parsed, discipline: str, derived: dict[str, Any]) -> str:
+    """The update, with each block written only if this call has one.
+
+    A call with no file and no streams has nothing to say about the values FIT-03
+    computes from samples, and saying it anyway means writing null over numbers
+    that came from real data. `reconcile.run(fetch_files=False)` did exactly that,
+    and so does any re-ingest that arrives while the original is briefly
+    unavailable: the ride keeps its row and quietly loses its power, heart rate
+    and cadence. The coach then reads a ride with no numbers and either says so or
+    works around it, and either way it is describing our write, not the ride.
+
+    When samples *were* read the columns are written unconditionally, nulls
+    included. That direction is not symmetrical and must not be: a file with no
+    power meter is a positive statement that this ride had no power, and
+    coalescing it would leave yesterday's figure standing.
+
+    The `derived` block is gated the same way and for the same reason. A file
+    from the watched folder carries no `icu_` fields at all, so writing its empty
+    block over an upstream read erases `icu_training_load` — which is what the
+    load rollups sum. The coach would then quote a seven day load that is short
+    by a ride nothing appears to be missing from. `analyzed_at` and
+    `derived_provisional` describe that block, so they move with it.
+    """
+    sets = [
+        "external_ref = coalesce(%(external_ref)s, external_ref)",
+        "content_hash = coalesce(%(content_hash)s, content_hash)",
+        "source = %(source)s",
+        "discipline = %(discipline)s",
+        "activity_type = %(activity_type)s",
+        "name = coalesce(%(upstream_name)s, name, %(stem)s)",
+        "started_at = %(started_at)s",
+        "local_date = %(local_date)s",
+        # Same reasoning as the sample columns, one step weaker: these fall back
+        # to the activity's own fields, so null here means neither the file nor
+        # the platform knew — which is not a reason to forget what we knew.
+        "duration_s = coalesce(%(duration_s)s, duration_s)",
+        "distance_m = coalesce(%(distance_m)s, distance_m)",
+        "elevation_m = coalesce(%(elevation_m)s, elevation_m)",
+        "coach_authored = %(coach_authored)s",
+        "backfilled = %(backfilled)s",
+        "paired_event_id = coalesce(%(paired_event_id)s, paired_event_id)",
+    ]
+    if derived:
+        sets += [
+            "derived = %(derived)s",
+            "analyzed_at = %(analyzed_at)s",
+            "derived_provisional = %(derived_provisional)s",
+        ]
+
+    powered = uses_power_analysis(discipline)
+    if parsed.sample_count:
+        written = (
+            SAMPLE_COLUMNS
+            if powered
+            else tuple(c for c in SAMPLE_COLUMNS if c not in POWER_COLUMNS)
+        )
+        sets += [f"{column} = %({column})s" for column in written]
+    if not powered:
+        # FIT-07 holds whatever this call read, so a discipline corrected upstream
+        # to golf drops the power figures it should never have carried. Kept out
+        # of the loop above because Postgres refuses two assignments to one column.
+        sets += [f"{column} = null" for column in POWER_COLUMNS]
+
+    return f"update sessions set {', '.join(sets)} where id = %(session_id)s"

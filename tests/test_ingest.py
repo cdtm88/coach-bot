@@ -175,6 +175,139 @@ def test_parsed_values_are_computed_not_borrowed(conn: psycopg.Connection) -> No
     assert float(session["avg_power_w"]) != session["derived"]["icu_average_watts"]
 
 
+def test_a_reingest_with_no_file_keeps_the_numbers_it_already_parsed(
+    conn: psycopg.Connection,
+) -> None:
+    """An update that read no samples has nothing to say about the parsed columns.
+
+    It used to say it anyway: `Parsed()` is all nulls, and the update wrote every
+    one of them. `reconcile.run(fetch_files=False)` did this by construction, and
+    any re-ingest arriving while the original is briefly unavailable does it by
+    accident — the ride keeps its row and silently loses its power, heart rate and
+    cadence. The coach then reads a ride with no numbers and describes our write
+    rather than the ride.
+    """
+    first = activities.ingest(conn, activity(), DUBAI, file_bytes=ride_fit())
+    conn.commit()
+
+    activities.ingest(conn, activity(), DUBAI)  # no file, no streams
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "select avg_power_w, np_power_w, avg_hr, max_hr, avg_cadence, sample_count, "
+            "       duration_s, distance_m from sessions where id = %s",
+            (first.session_id,),
+        )
+        row = cur.fetchone()
+    assert float(row["avg_power_w"]) == 150.0
+    assert row["np_power_w"] is not None
+    assert row["avg_hr"] == 140
+    assert row["max_hr"] == 150
+    assert row["avg_cadence"] is not None
+    assert row["sample_count"] == 120
+    assert row["duration_s"] is not None
+    assert row["distance_m"] is not None
+
+
+def test_a_reparse_that_read_samples_writes_its_nulls(conn: psycopg.Connection) -> None:
+    """The asymmetry, and it is deliberate.
+
+    A file with no power meter is a positive statement that this ride had no
+    power. Coalescing it the way the no-samples case does would leave the earlier
+    figure standing on a ride that never produced one.
+    """
+    first = activities.ingest(conn, activity(), DUBAI, file_bytes=ride_fit())
+    conn.commit()
+
+    no_power = build_fit(START, heart_rate=[130] * 120, cadence=[85] * 120)
+    activities.ingest(conn, activity(), DUBAI, file_bytes=no_power)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "select avg_power_w, np_power_w, avg_hr from sessions where id = %s",
+            (first.session_id,),
+        )
+        row = cur.fetchone()
+    assert row["avg_power_w"] is None, "the new file says there was no power"
+    assert row["np_power_w"] is None
+    assert row["avg_hr"] == 130
+
+
+def test_reconcile_without_files_does_not_erase_what_it_stored(conn: psycopg.Connection) -> None:
+    """`fetch_files=False` is the configuration that made this reachable."""
+    fake = FakeIntervals([activity()], {"i1001": ride_fit()})
+    reconcile.run(conn, fake, DUBAI, date(2026, 7, 1))
+    conn.commit()
+
+    reconcile.run(conn, fake, DUBAI, date(2026, 7, 1), backfill=True, fetch_files=False)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("select avg_power_w, sample_count from sessions where external_ref = 'i1001'")
+        row = cur.fetchone()
+    assert float(row["avg_power_w"]) == 150.0
+    assert row["sample_count"] == 120
+
+
+def test_a_file_with_no_platform_fields_does_not_erase_the_derived_block(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    """The same defect one column over, and this one moves a number the coach quotes.
+
+    A watched-folder file carries no `icu_` fields at all, so its empty derived
+    block used to be written straight over an upstream read — taking
+    `icu_training_load` with it. That is what the load rollups sum, so the seven
+    day load silently drops by a whole ride while every row still looks present.
+    """
+    body = ride_fit()
+    first = activities.ingest(conn, activity(), DUBAI, file_bytes=body)
+    conn.commit()
+
+    path = tmp_path / "2026-07-27-181000.fit"
+    path.write_bytes(body)
+    archive.ingest_file(conn, path, DUBAI)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "select derived, analyzed_at, derived_provisional from sessions where id = %s",
+            (first.session_id,),
+        )
+        row = cur.fetchone()
+    assert row["derived"]["icu_training_load"] == 55
+    assert row["derived"]["icu_ftp"] == 115
+
+
+def test_a_discipline_corrected_upstream_drops_the_power_figures(
+    conn: psycopg.Connection,
+) -> None:
+    """FIT-07 on the update path, not only on the insert.
+
+    A ride retyped as a golf round upstream must not keep the numbers it should
+    never have carried, whether or not this call read any samples.
+    """
+    first = activities.ingest(conn, activity(), DUBAI, file_bytes=ride_fit())
+    conn.commit()
+
+    activities.ingest(conn, activity(kind="Golf"), DUBAI)  # no file this time
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "select discipline, avg_power_w, np_power_w, max_power_w, avg_hr "
+            "from sessions where id = %s",
+            (first.session_id,),
+        )
+        row = cur.fetchone()
+    assert row["discipline"] == "golf"
+    assert row["avg_power_w"] is None
+    assert row["np_power_w"] is None
+    assert row["max_power_w"] is None
+    assert row["avg_hr"] == 140, "FIT-07 is about power, not about the whole row"
+
+
 def test_derived_block_holds_the_platform_fields(conn: psycopg.Connection) -> None:
     result = activities.ingest(conn, activity(), DUBAI, file_bytes=ride_fit())
     conn.commit()
