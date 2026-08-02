@@ -417,17 +417,26 @@ def test_a_failed_fetch_does_not_empty_the_calendar(conn, one_feed) -> None:
 
 
 def test_history_outside_the_window_survives_a_fetch(conn, one_feed) -> None:
-    """CALR-03 needs weeks that have happened; a forward-only sweep deletes them."""
+    """CALR-03 needs weeks that have happened; a forward-only sweep deletes them.
+
+    On the *configured* feed. This used to hang the old event off a feed id that
+    was never in `CALENDAR_ICS_URLS`, which tested the window rule through a
+    second rule that has since changed: an unconfigured feed is now removed
+    outright, so the fixture would have proved the window rule by relying on a
+    feed nothing had subscribed to. See `test_a_feed_no_longer_configured_is_forgotten`.
+    """
     old = TODAY - timedelta(days=60)
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "insert into calendar_feeds (id, name, url_fingerprint, position) values "
-            "('old-feed', 'Work', 'x', 0) on conflict do nothing"
+            "(%s, 'Work', 'x', 0) on conflict do nothing",
+            (feed.feed_id(SECRET_URL),),
         )
         cur.execute(
             "insert into calendar_events (feed, uid, summary, starts_at, ends_at, "
-            "local_date, busy) values ('old-feed', 'ancient', 'Old', %s, %s, %s, true)",
+            "local_date, busy) values (%s, 'ancient', 'Old', %s, %s, %s, true)",
             (
+                feed.feed_id(SECRET_URL),
                 datetime.combine(old, datetime.min.time(), tzinfo=DUBAI),
                 datetime.combine(old, datetime.min.time(), tzinfo=DUBAI) + timedelta(hours=1),
                 old,
@@ -767,3 +776,80 @@ def test_the_scheme_does_not_change_a_feeds_identity(monkeypatch: pytest.MonkeyP
 def test_an_ordinary_https_url_is_left_alone(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CALENDAR_ICS_URLS", SECRET_URL)
     assert feed.configured_urls() == [SECRET_URL]
+
+
+# --- Feeds that are no longer configured -------------------------------------
+
+
+def _orphan(conn: psycopg.Connection, feed_id: str = "old-feed") -> None:
+    """A feed the athlete used to subscribe to, with busy time it published."""
+    when = datetime.combine(TODAY, datetime.min.time(), tzinfo=DUBAI) + timedelta(hours=18)
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "insert into calendar_feeds (id, name, url_fingerprint, position) "
+            "values (%s, 'Old work', %s, 1)",
+            (feed_id, f"fingerprint-{feed_id}"),
+        )
+        cur.execute(
+            "insert into calendar_events (feed, uid, summary, starts_at, ends_at, "
+            "local_date, busy) values (%s, 'stale', 'Standup', %s, %s, %s, true)",
+            (feed_id, when, when + timedelta(hours=1), TODAY),
+        )
+
+
+def test_a_feed_no_longer_configured_is_forgotten(conn, one_feed) -> None:
+    """Swap one calendar for another and the old one's meetings used to stay.
+
+    `store` only refreshes feeds that are still configured, so occurrences from a
+    dropped feed were never revisited and never expired. PLAN-04 went on
+    scheduling around meetings from a calendar the athlete had unsubscribed from,
+    with nothing in the system able to say where they came from.
+    """
+    _orphan(conn)
+    feed.sync(conn, DUBAI, TODAY, client=transport(ics()))
+
+    with conn.cursor() as cur:
+        cur.execute("select id from calendar_feeds")
+        assert [r["id"] for r in cur.fetchall()] == [feed.feed_id(SECRET_URL)]
+    assert "stale" not in {r["uid"] for r in stored(conn)}, "the old calendar still blocks time"
+
+
+def test_the_configured_feed_is_not_pruned_when_its_fetch_fails(conn, one_feed) -> None:
+    """Configured is configured. An outage is not an unsubscription."""
+    feed.sync(conn, DUBAI, TODAY, client=transport(ics()))
+    feed.sync(conn, DUBAI, TODAY, client=transport(None))
+
+    with conn.cursor() as cur:
+        cur.execute("select count(*) as n from calendar_feeds")
+        assert cur.fetchone()["n"] == 1
+
+
+def test_an_empty_configuration_prunes_nothing(conn, monkeypatch) -> None:
+    """The dangerous direction, and the reason this is not a plain reconcile.
+
+    A compose file that loses the variable, an `.env` that fails to load, a typo
+    in the name: each reads as zero configured feeds. Treating that as "he
+    unsubscribed from everything" would delete every calendar he has on a
+    configuration slip. Stale busy time is recoverable; this would not be.
+    """
+    _orphan(conn)
+    monkeypatch.delenv("CALENDAR_ICS_URLS", raising=False)
+
+    assert feed.sync(conn, DUBAI, TODAY) == []
+
+    with conn.cursor() as cur:
+        cur.execute("select count(*) as n from calendar_feeds")
+        assert cur.fetchone()["n"] == 1, "an unset variable deleted the athlete's calendars"
+
+
+def test_pruning_takes_the_fetch_history_with_it(conn, one_feed) -> None:
+    """History for a feed nothing can name again is the orphan being removed."""
+    _orphan(conn)
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("insert into calendar_fetches (feed, ok, events) values ('old-feed', true, 3)")
+
+    feed.sync(conn, DUBAI, TODAY, client=transport(ics()))
+
+    with conn.cursor() as cur:
+        cur.execute("select count(*) as n from calendar_fetches where feed = 'old-feed'")
+        assert cur.fetchone()["n"] == 0
