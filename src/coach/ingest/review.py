@@ -94,15 +94,49 @@ def match(conn: psycopg.Connection, session_id: int) -> int | None:
             select p.id from prescriptions p
             where p.session_id is null
               and p.status in ('planned', 'adjusted')
-              and lower(p.discipline) = %s
+              and lower(p.discipline) = any(%s)
               and p.planned_for::date = %s
             order by p.planned_for
             limit 1
             """,
-            (session["discipline"], session["local_date"]),
+            (equivalents(session["discipline"]), session["local_date"]),
         )
         row = cur.fetchone()
     return row["id"] if row else None
+
+
+# What the platform calls an activity and what a coach calls a session are not
+# the same word, and PLAN-07's fallback matches on the word.
+#
+# Found on the live deployment: every one of seventeen ingested rides came back
+# as `virtualride`, because they are all Zwift. A prescription says `ride`. An
+# exact comparison means the two never meet, so no indoor ride would ever close
+# its prescription and adherence would read zero however faithfully the athlete
+# trained — silently, because nothing errors.
+#
+# Grouped rather than mapped to one canonical name: the stored discipline is
+# what the platform said and should stay that way (FIT-03 keeps the platform's
+# opinion as the platform's), so this widens the comparison instead of
+# rewriting the data.
+DISCIPLINE_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("ride", "virtualride", "gravelride", "mountainbikeride", "ebikeride", "cycling"),
+    ("run", "virtualrun", "trailrun"),
+    ("gym", "weighttraining", "workout", "strength"),
+    ("swim", "openwaterswim"),
+)
+
+
+def equivalents(discipline: str | None) -> list[str]:
+    """Every name that means the same activity, including the one given.
+
+    A discipline in no group matches only itself, which is the safe direction:
+    an unknown word should fail to match rather than match everything.
+    """
+    name = (discipline or "").lower()
+    for group in DISCIPLINE_GROUPS:
+        if name in group:
+            return list(group)
+    return [name]
 
 
 def compliance(conn: psycopg.Connection, session_id: int, prescription_id: int) -> Compliance:
