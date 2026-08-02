@@ -10,7 +10,7 @@ in :mod:`coach.memory.context` — this module renders the pieces it sheds.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -111,6 +111,67 @@ def render_staleness(conn: psycopg.Connection, now: datetime) -> str:
     return "\n".join(lines)
 
 
+UNREADABLE_WINDOW_DAYS = 14
+
+
+def render_unreadable(conn: psycopg.Connection, now: datetime, tz: ZoneInfo) -> str:
+    """Activities the platform holds and will not serve, against the day's plan.
+
+    intervals.icu returns a placeholder for anything synced from Strava, and on
+    this account those are the gym and golf sessions Whoop writes there. The row
+    says the athlete did something; nothing in it says what. So the one question
+    worth asking is whether it was the session that was planned, and that is a
+    question rather than an inference — the discipline is unknown, so the
+    ordinary date-and-discipline match in `review.match` cannot claim it and must
+    not be made to.
+
+    Scoped to days that also carry an unmatched prescription. An unreadable
+    activity on a day with nothing planned needs no conversation: it is a golf
+    round the coach neither prescribed nor has anything to say about, and listing
+    it would be the nagging CHAT-11 exists to prevent.
+
+    Context and not an interruption, on CHAT-09's precedent. This shapes what the
+    coach concludes about adherence; it does not spend the one thing per
+    conversation the coach may raise unbidden.
+    """
+    since = clock.local_day(now, tz) - timedelta(days=UNREADABLE_WINDOW_DAYS)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select s.local_date, s.started_at, s.name,
+                   p.discipline as planned_discipline, p.planned_for
+              from sessions s
+              join prescriptions p
+                on (p.planned_for at time zone 'UTC')::date = s.local_date
+               and p.session_id is null
+               and p.status in ('planned', 'adjusted', 'missed')
+             where s.data_unavailable
+               and s.local_date >= %s
+             order by s.local_date, s.started_at
+            """,
+            (since,),
+        )
+        rows = cur.fetchall()
+    if not rows:
+        return ""
+
+    lines = [
+        "ACTIVITY YOU CANNOT SEE",
+        "The platform recorded an activity on these days and will not serve it —",
+        "on this account that is usually a gym or golf session written to Strava by",
+        "Whoop. Something was done. What it was is not knowable from here, so a",
+        "planned session on the same day is neither completed nor missed until he",
+        "says which. Ask; never score it either way on your own.",
+    ]
+    for row in rows:
+        when = row["started_at"].astimezone(tz).strftime("%H:%M")
+        lines.append(
+            f"- {row['local_date']} at {when}: unreadable activity, "
+            f"against a planned {row['planned_discipline']}"
+        )
+    return "\n".join(lines)
+
+
 def render_body_mass(conn: psycopg.Connection, now: datetime, tz: ZoneInfo) -> str:
     """The weight trend, rendered as permissions rather than as numbers.
 
@@ -182,6 +243,7 @@ def assemble(
         "persona": persona.load(),
         "constraints": render_constraints(conn),
         "facts": render_facts(conn),
+        "unreadable": render_unreadable(conn, now, tz or clock.configured_tz()),
         "body_mass": render_body_mass(conn, now, tz or clock.configured_tz()),
         "recovery": render_recovery(conn, now, tz or clock.configured_tz()),
         "calendar": render_calendar(conn, now, tz or clock.configured_tz()),

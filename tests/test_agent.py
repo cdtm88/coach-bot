@@ -8,11 +8,13 @@ second chat id is refused. These are those assertions.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import psycopg
 import pytest
 
+import conftest
 from coach.agent import interruptions, naturalness, persona, prompt, tools
 from coach.memory import facts
 
@@ -351,3 +353,86 @@ def test_deferred_tools_say_so_rather_than_guessing(conn: psycopg.Connection, na
 def test_unknown_tool_is_rejected(conn: psycopg.Connection) -> None:
     with pytest.raises(tools.UnknownTool):
         tools.dispatch(conn, "delete_everything", {})
+
+
+# --- Activity the platform will not serve ----------------------------------
+
+DUBAI_TZ = ZoneInfo("Asia/Dubai")
+
+
+def _unreadable_session(conn: psycopg.Connection, on: date, at: datetime) -> int:
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
+            insert into sessions
+                (source, discipline, name, started_at, local_date, data_unavailable)
+            values ('intervals', 'other', 'Strava activity (data not available)', %s, %s, true)
+            returning id
+            """,
+            (at, on),
+        )
+        return cur.fetchone()["id"]
+
+
+def _planned(conn: psycopg.Connection, at: datetime, discipline: str = "gym") -> int:
+    from psycopg.types.json import Jsonb
+
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "insert into prescriptions (block_id, planned_for, discipline, spec) "
+            "values (%s, %s, %s, %s) returning id",
+            (conftest.ensure_block(conn), at, discipline, Jsonb({"duration_s": 3600})),
+        )
+        return cur.fetchone()["id"]
+
+
+def test_an_unreadable_activity_against_a_plan_is_a_question(conn: psycopg.Connection) -> None:
+    """Something was done. What it was is not knowable, so the coach asks.
+
+    These are the gym and golf sessions Whoop writes to Strava, which intervals
+    returns as a placeholder it will never serve. Scoring the planned session
+    either way off one is an inference from an empty row.
+    """
+    when = datetime(2026, 7, 26, 13, 18, tzinfo=UTC)
+    _unreadable_session(conn, date(2026, 7, 26), when)
+    _planned(conn, when)
+    conn.commit()
+
+    rendered = prompt.render_unreadable(conn, NOW, DUBAI_TZ)
+    assert "2026-07-26" in rendered
+    assert "planned gym" in rendered
+    assert "Ask" in rendered
+    assert "neither completed nor missed" in rendered
+
+
+def test_an_unreadable_activity_with_nothing_planned_is_not_raised(
+    conn: psycopg.Connection,
+) -> None:
+    """A golf round the coach neither prescribed nor has anything to say about.
+
+    Listing it would be the nagging CHAT-11 exists to prevent.
+    """
+    _unreadable_session(conn, date(2026, 7, 26), datetime(2026, 7, 26, 13, 18, tzinfo=UTC))
+    conn.commit()
+    assert prompt.render_unreadable(conn, NOW, DUBAI_TZ) == ""
+
+
+def test_a_matched_prescription_stops_the_question(conn: psycopg.Connection) -> None:
+    """Once he says what it was, there is nothing left to ask."""
+    when = datetime(2026, 7, 26, 13, 18, tzinfo=UTC)
+    session_id = _unreadable_session(conn, date(2026, 7, 26), when)
+    prescription_id = _planned(conn, when)
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "update prescriptions set session_id = %s, status = 'completed' where id = %s",
+            (session_id, prescription_id),
+        )
+    conn.commit()
+
+    assert prompt.render_unreadable(conn, NOW, DUBAI_TZ) == ""
+
+
+def test_the_question_never_spends_the_interruption_budget() -> None:
+    """CHAT-09's precedent: absence of data shapes reasoning, it does not interrupt."""
+    assert "unreadable" not in interruptions.PRIORITY
+    assert "unreadable_activity" not in interruptions.PRIORITY

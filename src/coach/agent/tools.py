@@ -341,7 +341,7 @@ def dispatch(conn: psycopg.Connection, name: str, arguments: dict[str, Any]) -> 
                 """
                 select id, local_date, discipline, activity_type, name, duration_s,
                        avg_power_w, np_power_w, avg_hr, max_hr, avg_cadence, source,
-                       derived
+                       derived, data_unavailable
                   from sessions
                  where local_date >= %s
                    and (%s::date is null or local_date <= %s)
@@ -373,6 +373,10 @@ def dispatch(conn: psycopg.Connection, name: str, arguments: dict[str, Any]) -> 
                     "avg_cadence": _serialise(r["avg_cadence"]),
                     "source": r["source"],
                     "load": (r["derived"] or {}).get("icu_training_load"),
+                    # The row means "he did something here", not "he did nothing".
+                    # Without this the empty columns read as a session that went
+                    # wrong rather than one the platform will not describe.
+                    "data_unavailable": r["data_unavailable"],
                 }
                 for r in rows
             ],

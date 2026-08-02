@@ -124,6 +124,35 @@ def type_of_file(parsed: parse.Parsed) -> str | None:
     return refined or FIT_SPORT_TYPES.get(parsed.sport, "Other")
 
 
+def is_unreadable(activity: dict[str, Any]) -> bool:
+    """An activity the platform holds but will not hand over.
+
+    intervals.icu answers the list with a placeholder for anything synced from
+    Strava — an id, a start time, a `source` and a `_note` reading "STRAVA
+    activities are not available via the API". There is no type, no name, no
+    duration and no samples, and there never will be: the file endpoint has
+    nothing and the streams endpoint has nothing.
+
+    Detected on the absence of a type rather than on the note's wording, because
+    the type is the operative fact. Whatever the platform says in prose, an
+    activity it will not classify is one this system cannot describe, and every
+    downstream decision here turns on that rather than on which upstream
+    integration happens to be withholding it.
+    """
+    return not (activity.get("type") or "").strip()
+
+
+def unreadable_name(activity: dict[str, Any]) -> str:
+    """A name that says what the row is, rather than leaving it blank.
+
+    A null name reads to the coach as an activity whose title went missing. This
+    one says the data was never available, which is the difference between a
+    question worth asking and a gap worth apologising for.
+    """
+    source = str(activity.get("source") or "upstream").strip().title()
+    return f"{source} activity (data not available)"
+
+
 def derived_fields(activity: dict[str, Any]) -> dict[str, Any]:
     """The platform's own numbers, segregated by prefix."""
     return {
@@ -325,6 +354,12 @@ def ingest(
     # `local_file` is the same lie as renaming it to the filename.
     upstream_read = external_ref is not None
 
+    # A placeholder for an activity upstream will not serve. The row exists so
+    # FIT-12's missed check can see that the athlete did something on the day —
+    # deleting it is what turns a gym session he did into a session he skipped —
+    # and the flag is what stops it being read as an activity with no numbers.
+    unreadable = upstream_read and is_unreadable(activity)
+
     # FIT-07 follows the discipline the row will actually have, which is not this
     # call's when this call is not the one allowed to set it. Reading the stored
     # value rather than assuming: a golf round matched on content hash must not
@@ -340,16 +375,21 @@ def ingest(
 
     derived = derived_fields(activity)
 
+    # A placeholder has no title either, and a null name reads as a title that
+    # went missing rather than as data that was never available.
+    upstream_name = name_of(activity) or (unreadable_name(activity) if unreadable else None)
+
     values: dict[str, Any] = {
         "external_ref": external_ref,
         "content_hash": hash_,
         "source": source,
         "discipline": discipline,
         "activity_type": activity.get("type"),
+        "data_unavailable": unreadable,
         # The insert takes the best name available; the update prefers upstream's
         # and keeps what is already there rather than falling to the stem.
-        "name": name_of(activity) or _blank_is_absent(fallback_name),
-        "upstream_name": name_of(activity),
+        "name": upstream_name or _blank_is_absent(fallback_name),
+        "upstream_name": upstream_name,
         "stem": _blank_is_absent(fallback_name),
         "started_at": started_at,
         "local_date": local_date,
@@ -411,14 +451,14 @@ INSERT = """
          started_at, local_date, duration_s, distance_m, elevation_m,
          avg_power_w, np_power_w, max_power_w, avg_hr, max_hr, avg_cadence,
          sample_count, derived, analyzed_at, derived_provisional,
-         coach_authored, backfilled, paired_event_id)
+         coach_authored, backfilled, paired_event_id, data_unavailable)
     values
         (%(external_ref)s, %(content_hash)s, %(source)s, %(discipline)s,
          %(activity_type)s, %(name)s, %(started_at)s, %(local_date)s, %(duration_s)s,
          %(distance_m)s, %(elevation_m)s, %(avg_power_w)s, %(np_power_w)s,
          %(max_power_w)s, %(avg_hr)s, %(max_hr)s, %(avg_cadence)s, %(sample_count)s,
          %(derived)s, %(analyzed_at)s, %(derived_provisional)s, %(coach_authored)s,
-         %(backfilled)s, %(paired_event_id)s)
+         %(backfilled)s, %(paired_event_id)s, %(data_unavailable)s)
     returning id
 """
 
@@ -482,6 +522,10 @@ def update_statement(
             "discipline = %(discipline)s",
             "activity_type = %(activity_type)s",
             "coach_authored = %(coach_authored)s",
+            # Only an upstream read can tell whether the platform will serve this
+            # activity, and it can say so in either direction: a Strava sync that
+            # later becomes readable clears the flag on the next poll.
+            "data_unavailable = %(data_unavailable)s",
         ]
     if derived:
         sets += [

@@ -1216,3 +1216,132 @@ def test_an_unknown_discipline_matches_only_itself(conn: psycopg.Connection) -> 
     assert "virtualride" in reviewmod.equivalents("ride")
     assert "ride" in reviewmod.equivalents("virtualride")
     assert "weighttraining" in reviewmod.equivalents("gym")
+
+
+# --- Activities upstream holds and will not serve ---------------------------
+
+
+def strava_placeholder(
+    activity_id: str = "s9001", start_local: str = "2026-07-27T17:18:36"
+) -> dict[str, Any]:
+    """Exactly what the live account returns for a Strava-synced activity.
+
+    Five keys, no type, no name, no duration. On this athlete's account these are
+    the gym and golf sessions Whoop writes to Strava — six in four weeks.
+    """
+    return {
+        "id": activity_id,
+        "icu_athlete_id": "i653843",
+        "start_date_local": start_local,
+        "source": "STRAVA",
+        "_note": "STRAVA activities are not available via the API",
+    }
+
+
+def test_an_activity_the_platform_will_not_serve_is_flagged_not_faked(
+    conn: psycopg.Connection,
+) -> None:
+    """It said a session existed with discipline 'other' and no numbers.
+
+    Which is indistinguishable from a real activity whose data went missing, and
+    the coach had no way to tell the two apart.
+    """
+    result = activities.ingest(conn, strava_placeholder(), DUBAI)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "select data_unavailable, discipline, name, duration_s, sample_count "
+            "from sessions where id = %s",
+            (result.session_id,),
+        )
+        row = cur.fetchone()
+    assert row["data_unavailable"] is True
+    assert row["discipline"] == "other", "the type is unknown, so nothing is guessed"
+    assert row["name"] == "Strava activity (data not available)"
+    assert row["duration_s"] is None and row["sample_count"] == 0
+
+
+def test_the_row_survives_because_deleting_it_would_invent_a_missed_session(
+    conn: psycopg.Connection,
+) -> None:
+    """FIT-12 counts sessions on the day before concluding one was skipped.
+
+    Drop the placeholder and the gym session he actually did becomes a gym
+    session he missed — which then feeds the ADJ-01 triggers and depresses
+    adherence. The row is the evidence that something happened.
+    """
+    planned = datetime(2026, 7, 27, 18, 0, tzinfo=DUBAI)
+    prescribe(conn, planned, discipline="gym")
+    activities.ingest(conn, strava_placeholder(), DUBAI)
+    conn.commit()
+
+    verdicts = review.missed(conn, planned + timedelta(hours=30), DUBAI)
+    assert len(verdicts) == 1
+    assert verdicts[0]["missed"] is False
+    assert "will not serve" in verdicts[0]["reason"]
+    assert verdicts[0]["signals"]["unreadable_on_day"] == 1
+
+
+def test_a_readable_session_on_the_day_still_reads_as_unmatched(
+    conn: psycopg.Connection,
+) -> None:
+    """The new branch must only claim days where *every* session is unreadable."""
+    planned = datetime(2026, 7, 27, 18, 0, tzinfo=DUBAI)
+    prescribe(conn, planned, discipline="gym")
+    activities.ingest(conn, strava_placeholder(), DUBAI)
+    activities.ingest(conn, activity(kind="Golf"), DUBAI, file_bytes=ride_fit())
+    conn.commit()
+
+    verdicts = review.missed(conn, planned + timedelta(hours=30), DUBAI)
+    assert verdicts[0]["missed"] is False
+    assert "unmatched rather than missed" in verdicts[0]["reason"]
+
+
+def test_nothing_is_reviewed_off_an_activity_nobody_can_see(
+    conn: psycopg.Connection,
+) -> None:
+    """A forward looking note about a session the model has never seen is fiction."""
+    result = activities.ingest(conn, strava_placeholder(), DUBAI)
+    conn.commit()
+
+    calls: list[int] = []
+    assert review.review(conn, result.session_id, lambda _: calls.append(1) or "note") is None
+    assert calls == [], "the note writer must not be called for an unreadable activity"
+
+
+def test_it_cannot_claim_a_prescription_by_date_alone(conn: psycopg.Connection) -> None:
+    """The discipline is unknown, so the FIT-05 fallback must not match it.
+
+    Silently completing a gym prescription off an activity that might have been
+    a golf round is the inference this whole row exists to avoid.
+    """
+    prescribe(conn, datetime(2026, 7, 27, 18, 0, tzinfo=DUBAI), discipline="gym")
+    result = activities.ingest(conn, strava_placeholder(), DUBAI)
+    conn.commit()
+
+    assert review.match(conn, result.session_id) is None
+
+
+def test_an_activity_that_becomes_readable_clears_the_flag(conn: psycopg.Connection) -> None:
+    """Upstream can change its mind; a later poll must be able to say so."""
+    result = activities.ingest(conn, strava_placeholder(), DUBAI)
+    conn.commit()
+
+    activities.ingest(
+        conn,
+        activity("s9001", kind="Ride", start_local="2026-07-27T17:18:36"),
+        DUBAI,
+        file_bytes=ride_fit(),
+    )
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "select data_unavailable, discipline, name from sessions where id = %s",
+            (result.session_id,),
+        )
+        row = cur.fetchone()
+    assert row["data_unavailable"] is False
+    assert row["discipline"] == "ride"
+    assert row["name"] == "Tempus Fugit"
