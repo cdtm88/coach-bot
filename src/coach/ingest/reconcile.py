@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 
+from coach import feeds as feedmod
 from coach.ingest import activities as actmod
 from coach.ingest import client as clientmod
 
@@ -129,7 +130,13 @@ def run(
         upstream = client.activities(oldest, newest)
     except clientmod.IntervalsError as exc:
         outcome.errors.append(str(exc))
+        feedmod.record_error(conn, feedmod.ACTIVITIES, str(exc))
         return outcome
+
+    # OBS-05. The call returning is the whole of the claim: an empty window is a
+    # rest week and not a broken feed, and CHAT-09 exists to stop the coach
+    # conflating the two.
+    feedmod.record_success(conn, feedmod.ACTIVITIES)
 
     known = local_refs(conn, oldest, newest)
 

@@ -31,6 +31,7 @@ from zoneinfo import ZoneInfo
 import psycopg
 from psycopg.types.json import Jsonb
 
+from coach import feeds as feedmod
 from coach.ingest import activities as actmod
 from coach.ingest import archive as archivemod
 from coach.ingest import client as clientmod
@@ -104,6 +105,12 @@ def on_activity(
         conn, activity, tz, file_bytes=file_bytes, streams=streams, backfilled=backfilled
     )
     result = Handled(session_id=ingested.session_id, created=ingested.created)
+
+    # OBS-05: an activity read and stored is the activities feed working, and the
+    # webhook drain never goes through reconcile, which is where the poll stamps
+    # it. Without this the feed reads as never-successful on a deployment that
+    # has a registered app.
+    feedmod.record_success(conn, feedmod.ACTIVITIES)
 
     # FIT-15: the archive keeps the bytes even though upstream has them too,
     # because upstream deleting them is the case the archive exists for.

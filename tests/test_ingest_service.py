@@ -27,6 +27,7 @@ import psycopg
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
+from coach.ingest import client as clientmod  # noqa: E402
 from coach.ingest import server, service  # noqa: E402
 from conftest_fit import build_fit  # noqa: E402
 from ingest_harness import Upstream, connector, post  # noqa: E402
@@ -458,3 +459,95 @@ def test_the_sweep_makes_no_upstream_call(conn: psycopg.Connection) -> None:
     """It only reads prescriptions and sessions, so it costs nothing upstream."""
     result = service.sweep(conn, DUBAI, datetime(2026, 7, 28, 12, 0, tzinfo=UTC))
     assert result == {"missed": 0}
+
+
+# --- OBS-05 / CHAT-09: the feeds the poll is responsible for stamping --------
+
+
+def _feed(conn: psycopg.Connection, name: str) -> dict[str, Any]:
+    with conn.cursor() as cur:
+        cur.execute("select last_success_at, last_error from feeds where name = %s", (name,))
+        return cur.fetchone()
+
+
+def test_a_successful_poll_stamps_the_feeds_it_read(
+    conn: psycopg.Connection, sandbox: Path
+) -> None:
+    """OBS-05 names five inbound feeds; two of them run through this poll.
+
+    Nothing used to stamp either, and `feeds` is seeded with all five at
+    migration time, so CHAT-09 read them as never-successful on every turn
+    forever — the coach hedged its numbers minutes after seventeen activities had
+    come through that same client.
+    """
+    inbox = sandbox / "inbox"
+    inbox.mkdir()
+    (inbox / "zwift-ride.fit").write_bytes(ride_fit())
+
+    service.poll(conn, Upstream([activity()], {"i1001": ride_fit()}), DUBAI)
+    conn.commit()
+
+    assert _feed(conn, "activities")["last_success_at"] is not None
+    assert _feed(conn, "fit_archive")["last_success_at"] is not None
+
+
+def test_a_quiet_week_is_not_a_broken_feed(conn: psycopg.Connection, sandbox: Path) -> None:
+    """The feed answered. It carried nothing because nothing happened.
+
+    CHAT-09's own words are that absence of data is not evidence of absence of
+    activity, so a rest week must not be reported to the coach as a dead feed.
+    """
+    (sandbox / "inbox").mkdir()
+    service.poll(conn, Upstream([]), DUBAI)
+    conn.commit()
+
+    assert _feed(conn, "activities")["last_success_at"] is not None
+    assert _feed(conn, "fit_archive")["last_success_at"] is not None
+
+
+def test_an_unreachable_upstream_records_the_error_and_no_success(
+    conn: psycopg.Connection, sandbox: Path
+) -> None:
+    (sandbox / "inbox").mkdir()
+
+    class Broken(Upstream):
+        def activities(self, oldest: date, newest: date | None = None) -> list[dict[str, Any]]:
+            raise clientmod.IntervalsError("503 from intervals.icu")
+
+    service.poll(conn, Broken([]), DUBAI)
+    conn.commit()
+
+    feed = _feed(conn, "activities")
+    assert feed["last_success_at"] is None
+    assert "503" in feed["last_error"]
+
+
+def test_a_watched_folder_that_disappeared_is_an_error_not_a_success(
+    conn: psycopg.Connection, sandbox: Path
+) -> None:
+    """The archive is stale when the sync stops mounting, not when riding stops."""
+    service.poll(conn, Upstream([]), DUBAI)  # the inbox is deliberately not created
+    conn.commit()
+
+    feed = _feed(conn, "fit_archive")
+    assert feed["last_success_at"] is None
+    assert "does not exist" in feed["last_error"]
+
+
+def test_the_coach_does_not_call_a_working_feed_dead(
+    conn: psycopg.Connection, sandbox: Path
+) -> None:
+    """The end of the chain, and the reason the two above matter.
+
+    CHAT-09 renders straight into the system prompt, so a feed nothing stamps is
+    not merely untracked: it is asserted to the coach as never having returned.
+    """
+    from coach.agent import prompt
+
+    (sandbox / "inbox").mkdir()
+    service.poll(conn, Upstream([activity()], {"i1001": ride_fit()}), DUBAI)
+    conn.commit()
+
+    rendered = prompt.render_staleness(conn, datetime.now(UTC))
+    assert "activities" not in rendered
+    assert "fit_archive" not in rendered

@@ -100,6 +100,21 @@ def paired_event_id_of(activity: dict[str, Any]) -> str | None:
     return str(raw) if raw not in (None, "", 0) else None
 
 
+def _blank_is_absent(value: str | None) -> str | None:
+    return (value or "").strip() or None
+
+
+def name_of(activity: dict[str, Any]) -> str | None:
+    """The title upstream gave the ride, or None when it gave none.
+
+    Blank is None rather than a name. intervals.icu serves `"name": ""` for an
+    activity the athlete never titled, and an empty string stored is still a
+    value: it would win a coalesce against a perfectly good existing name.
+    """
+    raw = activity.get("name")
+    return _blank_is_absent(raw) if isinstance(raw, str) else None
+
+
 def started_at_of(activity: dict[str, Any], tz: ZoneInfo) -> datetime:
     """FIT-10: from the activity data, never from ingest time.
 
@@ -174,12 +189,26 @@ def ingest(
     streams: list[dict[str, Any]] | None = None,
     backfilled: bool = False,
     source: str = "intervals",
+    fallback_name: str | None = None,
 ) -> Ingested:
     """Create or update one session row.
 
     Parsed values come from the file if there is one, from streams otherwise, and
     are absent rather than borrowed from `icu_` fields when neither is available
     (FIT-03).
+
+    `fallback_name` is for callers that have no name to offer, only something
+    name-shaped — the watched folder path has a file stem and nothing else. It
+    names a row that would otherwise have no name and never replaces one that
+    already does.
+
+    The ordering there is load bearing, because the two ingest paths meet on one
+    row. A ride comes back from the API as "Zwift - Race: Stage 3" and sits on
+    disk as `2026-07-27-181000.fit`; the poll's reconcile stores it, then the
+    watched folder scan finds the identical bytes, matches them on content hash
+    (FIT-04) and updates the row it just found. The stem is the only name that
+    path has, so before this it was the name that survived, and the coach
+    discussed "2026-07-27-181000" with the athlete.
     """
     external_ref = activity.get("id")
     started_at = started_at_of(activity, tz)
@@ -212,13 +241,20 @@ def ingest(
     if session_id is None and is_coach_authored(activity):
         session_id = match_coach_authored(conn, activity, started_at)
 
-    values = (
+    upstream_name = name_of(activity)
+    stem = _blank_is_absent(fallback_name)
+
+    # Split around the name because the two statements disagree about it, and
+    # only about it: an insert takes the best name available, an update takes the
+    # upstream one or keeps what is already there.
+    head = (
         external_ref,
         hash_,
         source,
         discipline,
         activity.get("type"),
-        activity.get("name"),
+    )
+    tail = (
         started_at,
         local_date,
         parsed.duration_s or activity.get("moving_time") or activity.get("elapsed_time"),
@@ -251,7 +287,8 @@ def ingest(
                 update sessions set
                     external_ref = coalesce(%s, external_ref),
                     content_hash = coalesce(%s, content_hash),
-                    source = %s, discipline = %s, activity_type = %s, name = %s,
+                    source = %s, discipline = %s, activity_type = %s,
+                    name = coalesce(%s, name, %s),
                     started_at = %s, local_date = %s, duration_s = %s, distance_m = %s,
                     elevation_m = %s, avg_power_w = %s, np_power_w = %s, max_power_w = %s,
                     avg_hr = %s, max_hr = %s, avg_cadence = %s, sample_count = %s,
@@ -260,7 +297,7 @@ def ingest(
                     paired_event_id = coalesce(%s, paired_event_id)
                 where id = %s
                 """,
-                (*values, session_id),
+                (*head, upstream_name, stem, *tail, session_id),
             )
             return Ingested(session_id, created=False, reason="matched an existing session")
 
@@ -276,6 +313,6 @@ def ingest(
                     %s, %s, %s, %s, %s, %s)
             returning id
             """,
-            values,
+            (*head, upstream_name or stem, *tail),
         )
         return Ingested(cur.fetchone()["id"], created=True)

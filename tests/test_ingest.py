@@ -413,6 +413,87 @@ def test_the_archive_survives_an_upstream_deletion(
     assert path.exists()
 
 
+def test_a_folder_scan_does_not_rename_a_ride_upstream_already_named(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    """The two ingest paths meet on one row, and the filename must not win.
+
+    A Zwift ride reaches intervals.icu as "Tempus Fugit" and sits on disk as
+    `2026-07-27-181000.fit`. The poll stores it, the watched folder scan finds
+    the identical bytes, FIT-04 matches them on content hash, and the update that
+    follows used to write the stem over the title. The coach then discussed
+    "2026-07-27-181000" with the athlete, which is a lie the suite could not see
+    because both halves worked exactly as written.
+    """
+    body = ride_fit()
+    activities.ingest(conn, activity("i1001"), DUBAI, file_bytes=body)
+    conn.commit()
+
+    path = tmp_path / "2026-07-27-181000.fit"
+    path.write_bytes(body)
+    session_id = archive.ingest_file(conn, path, DUBAI)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("select count(*) as n from sessions")
+        assert cur.fetchone()["n"] == 1, "FIT-04 should have matched, not duplicated"
+        cur.execute("select name from sessions where id = %s", (session_id,))
+        assert cur.fetchone()["name"] == "Tempus Fugit"
+
+
+def test_a_file_with_no_upstream_name_is_still_named_by_its_stem(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    """The stem is a fallback, so it must still name a row that has nothing."""
+    path = tmp_path / "2026-07-27-181000.fit"
+    path.write_bytes(ride_fit())
+    session_id = archive.ingest_file(conn, path, DUBAI)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("select name from sessions where id = %s", (session_id,))
+        assert cur.fetchone()["name"] == "2026-07-27-181000"
+
+
+def test_an_untitled_upstream_activity_does_not_erase_a_name(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    """intervals.icu serves `name: ""` for an activity nobody titled.
+
+    Stored, an empty string is a value, and it would win the coalesce against the
+    name the row already had. So blank is read as absent.
+    """
+    path = tmp_path / "2026-07-27-181000.fit"
+    path.write_bytes(ride_fit())
+    session_id = archive.ingest_file(conn, path, DUBAI)
+    conn.commit()
+
+    activities.ingest(conn, activity("i1001", name="  "), DUBAI, file_bytes=path.read_bytes())
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("select name, external_ref from sessions where id = %s", (session_id,))
+        row = cur.fetchone()
+    assert row["name"] == "2026-07-27-181000"
+    assert row["external_ref"] == "i1001", "the same row, reached from upstream"
+
+
+def test_upstream_renaming_a_ride_still_reaches_the_row(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    """Preferring upstream must not mean freezing the name at first sight."""
+    body = ride_fit()
+    activities.ingest(conn, activity("i1001"), DUBAI, file_bytes=body)
+    conn.commit()
+
+    activities.ingest(conn, activity("i1001", name="Zwift - Race: Stage 3"), DUBAI, file_bytes=body)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("select name from sessions where external_ref = 'i1001'")
+        assert cur.fetchone()["name"] == "Zwift - Race: Stage 3"
+
+
 def test_the_archive_module_contains_no_delete() -> None:
     """FIT-15 as a property of the code, not just of one test's data."""
     source = (Path(__file__).parents[1] / "src/coach/ingest/archive.py").read_text().lower()

@@ -47,6 +47,7 @@ import psycopg
 import recurring_ical_events
 
 from coach import clock
+from coach import feeds as feedmod
 
 log = logging.getLogger(__name__)
 
@@ -502,16 +503,8 @@ def _record_feed_health(conn: psycopg.Connection, results: list[Fetched]) -> Non
     """OBS-05: the `calendar` feed is healthy when every configured feed read."""
     if not results:
         return
-    ok = all(result.ok for result in results)
-    with conn.transaction(), conn.cursor() as cur:
-        if ok:
-            cur.execute(
-                "update feeds set last_success_at = now(), last_error = null "
-                "where name = 'calendar'"
-            )
-        else:
-            failed = ", ".join(r.name for r in results if not r.ok)
-            cur.execute(
-                "update feeds set last_error = %s where name = 'calendar'",
-                (f"failed: {failed}",),
-            )
+    if all(result.ok for result in results):
+        feedmod.record_success(conn, feedmod.CALENDAR)
+    else:
+        failed = ", ".join(r.name for r in results if not r.ok)
+        feedmod.record_error(conn, feedmod.CALENDAR, f"failed: {failed}")

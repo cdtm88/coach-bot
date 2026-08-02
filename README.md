@@ -90,6 +90,7 @@ src/coach/
   config.py        environment only; no credential defaults (SEC-01)
   clock.py         local day and week boundaries, and the configured zone (TZ-01/02/03)
   db.py            connections
+  feeds.py         last success per inbound feed; what CHAT-09 reads (OBS-05)
   migrate.py       the boot-time runner
   seed.py          one-time memory seed from seeds/athlete.json
   memory/          P00: the store

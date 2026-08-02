@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 
+from coach import feeds as feedmod
 from coach.ingest import activities as actmod
 from coach.ingest import parse
 
@@ -87,13 +88,18 @@ def ingest_file(
 
     # Synthesised to match what the upstream path builds, so both routes converge
     # on one ingest function rather than two that drift.
+    #
+    # The stem goes in as a fallback and not as `name`. This path routinely lands
+    # on a row the poll already created from the same bytes, and a filename is
+    # not a correction to the title the platform gave the ride.
     synthetic = {
         "id": None,
         "type": "Ride",
-        "name": path.stem,
         "start_date_local": parsed.started_at.isoformat(),
     }
-    result = actmod.ingest(conn, synthetic, tz, file_bytes=payload, source="local_file")
+    result = actmod.ingest(
+        conn, synthetic, tz, file_bytes=payload, source="local_file", fallback_name=path.stem
+    )
 
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
@@ -104,9 +110,16 @@ def ingest_file(
 
 
 def scan(conn: psycopg.Connection, folder: Path, tz: ZoneInfo) -> list[int]:
-    """Ingest every unseen FIT file in the watched folder."""
+    """Ingest every unseen FIT file in the watched folder.
+
+    OBS-05's `fit_archive` feed is stamped here, and it is the readability of the
+    folder that is being stamped rather than the arrival of a file. A fortnight
+    with no rides must not read as a broken archive — a sync that stopped
+    mounting the directory must.
+    """
     if not folder.exists():
         log.info("watched folder %s does not exist yet", folder)
+        feedmod.record_error(conn, feedmod.FIT_ARCHIVE, f"watched folder {folder} does not exist")
         return []
 
     ingested = []
@@ -116,6 +129,8 @@ def scan(conn: psycopg.Connection, folder: Path, tz: ZoneInfo) -> list[int]:
         session_id = ingest_file(conn, path, tz)
         if session_id is not None:
             ingested.append(session_id)
+
+    feedmod.record_success(conn, feedmod.FIT_ARCHIVE)
     return ingested
 
 
