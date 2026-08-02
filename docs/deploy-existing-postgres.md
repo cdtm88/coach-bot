@@ -47,16 +47,61 @@ three.
 ## Secrets
 
 Following the existing `secrets/` pattern, 0700 root. Four more alongside
-`app_password`:
+`app_password`, one of which already exists as an empty placeholder:
 
 ```
-secrets/anthropic_api_key
-secrets/telegram_bot_token      # the existing empty telegram_token, filled
-secrets/intervals_api_key
-secrets/macro_ingest_secret
+anthropic_api_key
+intervals_api_key
+telegram_token                  # the existing empty one, filled
+macro_ingest_secret             # openssl rand -hex 32
 ```
+
+**Not beside the compose file.** On Unraid the Compose Manager plugin keeps
+projects under `/boot/config/plugins/compose.manager/projects/`, and `/boot` is
+the flash drive — vfat, so `chmod 600` there is a silent no-op and the files stay
+world readable. The flash is also what the flash backup copies wholesale, which
+would put the API keys inside a backup archive. Keep them on the array beside the
+database's own secrets and give the `secrets:` block absolute paths.
+
+**Ownership matters here, unusually.** Outside swarm, Compose bind-mounts a
+secret file with its host ownership intact — the `uid`, `gid` and `mode` fields
+of the long syntax are swarm-only and are ignored. All four services run as
+`10001`, so a root-owned 0600 file is unreadable to them, and the failure is a
+container that starts and then cannot authenticate. `chown 10001:10001` the four
+new files. The existing `app_password` needs nothing: it is 0644, which uid 10001
+can already read, and the directory being 0700 is what keeps it private on the
+host.
+
+Write them with `printf` rather than `echo` out of habit rather than necessity —
+the entrypoints read each one through `$(cat …)`, and command substitution strips
+trailing newlines. `read -rsp` avoids putting a key into shell history at all.
 
 Everything else is ordinary configuration and belongs in `.env`.
+
+## What `.env` needs
+
+No `DATABASE_URL` and no `POSTGRES_PASSWORD`: the libpq variables are set
+literally in the compose `environment:` block and the password comes from the
+mounted file.
+
+| | |
+| --- | --- |
+| `COACH_TZ` | required; the zone the coach reasons in, an IANA name |
+| `TELEGRAM_CHAT_ID` | required; SEC-03's allowlist, checked on every message |
+| `COACH_FIT_ARCHIVE`, `COACH_FIT_WATCH` | the two host paths below |
+| `INTERVALS_ATHLETE_ID` | optional; `0` resolves to the key owner |
+| `TZ`, `COACH_LOG_LEVEL`, `DAILY_SPEND_CAP_USD` | optional, all defaulted |
+| `CALENDAR_ICS_URLS` | empty until the secret iCal addresses exist |
+
+The two required ones are required in the literal sense — both are `${VAR:?…}`,
+so `docker compose up` refuses to start **any** service until they are set, not
+just the one that reads them. That is deliberate for `TELEGRAM_CHAT_ID`: an
+unset allowlist that defaulted to something permissive would be a coach that
+talks to whoever finds the bot.
+
+`INTERVALS_WEBHOOK_SECRET` can stay unset. The receiver is built and idle, and
+unset means every webhook payload is refused — the right posture with no
+registered app.
 
 ## The service blocks
 
@@ -175,22 +220,33 @@ services:
       postgres: { condition: service_healthy }
       migrate:  { condition: service_completed_successfully }
 
+# Absolute, because the secrets live on the array and the compose file may not.
+# The names on the left are what the containers see under /run/secrets; only the
+# telegram one differs from its file, which is why it is spelled out.
 secrets:
-  app_password:        { file: ./secrets/app_password }
-  anthropic_api_key:   { file: ./secrets/anthropic_api_key }
-  telegram_bot_token:  { file: ./secrets/telegram_bot_token }
-  intervals_api_key:   { file: ./secrets/intervals_api_key }
-  macro_ingest_secret: { file: ./secrets/macro_ingest_secret }
+  app_password:        { file: /mnt/user/appdata/coach-bot/secrets/app_password }
+  anthropic_api_key:   { file: /mnt/user/appdata/coach-bot/secrets/anthropic_api_key }
+  telegram_bot_token:  { file: /mnt/user/appdata/coach-bot/secrets/telegram_token }
+  intervals_api_key:   { file: /mnt/user/appdata/coach-bot/secrets/intervals_api_key }
+  macro_ingest_secret: { file: /mnt/user/appdata/coach-bot/secrets/macro_ingest_secret }
 ```
 
 ## Two host directories
 
+On the array, for the same reason the secrets are — a relative path would resolve
+beside the compose file, which on Unraid is the flash drive, and the FIT archive
+is the one directory in the system that grows forever and is never pruned.
+
 ```bash
-mkdir -p fit-archive fit-inbox
-chown -R 10001:10001 fit-archive fit-inbox
+mkdir -p /mnt/user/appdata/coach-bot/fit-archive /mnt/user/appdata/coach-bot/fit-inbox
+chown -R 10001:10001 /mnt/user/appdata/coach-bot/fit-archive /mnt/user/appdata/coach-bot/fit-inbox
+chmod 750 /mnt/user/appdata/coach-bot/fit-archive /mnt/user/appdata/coach-bot/fit-inbox
 ```
 
-`10001` matches the `user:` above and the uid baked into the image. The
+Then point `COACH_FIT_ARCHIVE` and `COACH_FIT_WATCH` in `.env` at them. `ls -ldn`
+rather than `ls -ld` to check: the uid prints as `10001` because no such user
+exists on the host, which is expected — it only has to mean something inside the
+container. `10001` matches the `user:` above and the uid baked into the image. The
 `backups/postgres` directory is already writable by the sidecar; the scheduler
 writes a `facts-*.md` into it, which is why the existing retention is scoped to
 `daily/` and `monthly/` by pattern.
