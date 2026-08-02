@@ -251,6 +251,89 @@ def test_reconcile_without_files_does_not_erase_what_it_stored(conn: psycopg.Con
     assert row["sample_count"] == 120
 
 
+def test_a_folder_scan_does_not_relabel_a_row_the_platform_described(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    """The watched folder knows a file and a timestamp. It does not know a type.
+
+    `ingest_file` synthesises `{"type": "Ride", "source": "local_file"}` because
+    that is all it has, and the update wrote both over a row the API had already
+    described. A Zwift ride came back an outdoor one, off a source it never came
+    from.
+    """
+    body = ride_fit()
+    first = activities.ingest(conn, activity(kind="VirtualRide"), DUBAI, file_bytes=body)
+    conn.commit()
+
+    path = tmp_path / "2026-07-27-181000.fit"
+    path.write_bytes(body)
+    archive.ingest_file(conn, path, DUBAI)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "select source, discipline, activity_type from sessions where id = %s",
+            (first.session_id,),
+        )
+        row = cur.fetchone()
+    assert row["source"] == "intervals"
+    assert row["discipline"] == "virtualride"
+    assert row["activity_type"] == "VirtualRide"
+
+
+def test_a_golf_round_does_not_acquire_power_from_a_folder_scan(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    """FIT-07 has to survive the path that thinks everything is a ride.
+
+    This is why the power decision reads the stored discipline rather than this
+    call's. A scan that cannot set the discipline must not get to act as though
+    it had.
+    """
+    body = ride_fit()
+    first = activities.ingest(conn, activity(kind="Golf"), DUBAI, file_bytes=body)
+    conn.commit()
+
+    path = tmp_path / "2026-07-27-181000.fit"
+    path.write_bytes(body)
+    archive.ingest_file(conn, path, DUBAI)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "select discipline, avg_power_w, np_power_w, avg_hr from sessions where id = %s",
+            (first.session_id,),
+        )
+        row = cur.fetchone()
+    assert row["discipline"] == "golf"
+    assert row["avg_power_w"] is None, "FIT-07: a golf round carries no power figures"
+    assert row["np_power_w"] is None
+    assert row["avg_hr"] == 140, "the samples it did read still land"
+
+
+def test_a_folder_scan_does_not_disown_a_coach_authored_session(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    """FIT-17's flag comes from an `external_id` a synthetic dict does not have."""
+    body = ride_fit()
+    first = activities.ingest(
+        conn,
+        activity(external_id=f"{activities.COACH_MARKER}0"),
+        DUBAI,
+        file_bytes=body,
+    )
+    conn.commit()
+
+    path = tmp_path / "2026-07-27-181000.fit"
+    path.write_bytes(body)
+    archive.ingest_file(conn, path, DUBAI)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("select coach_authored from sessions where id = %s", (first.session_id,))
+        assert cur.fetchone()["coach_authored"] is True
+
+
 def test_a_file_with_no_platform_fields_does_not_erase_the_derived_block(
     conn: psycopg.Connection, tmp_path: Path
 ) -> None:

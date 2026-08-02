@@ -148,6 +148,14 @@ def existing(conn: psycopg.Connection, external_ref: str | None, hash_: str | No
     return None
 
 
+def stored_discipline(conn: psycopg.Connection, session_id: int) -> str | None:
+    """What the row already says it is. FIT-07 is decided on this, not on a guess."""
+    with conn.cursor() as cur:
+        cur.execute("select discipline from sessions where id = %s", (session_id,))
+        row = cur.fetchone()
+    return row["discipline"] if row else None
+
+
 def match_coach_authored(
     conn: psycopg.Connection, activity: dict[str, Any], started_at: datetime
 ) -> int | None:
@@ -232,14 +240,31 @@ def ingest(
         except parse.UnparseableActivity as exc:
             log.info("activity %s: %s", external_ref, exc)
 
-    # FIT-07: a golf round or a gym session gets no power figures even if the
-    # device recorded some.
-    if not uses_power_analysis(discipline):
-        parsed.avg_power_w = parsed.np_power_w = parsed.max_power_w = None
-
     session_id = existing(conn, external_ref, hash_)
     if session_id is None and is_coach_authored(activity):
         session_id = match_coach_authored(conn, activity, started_at)
+
+    # Whether this call carries the platform's own view of the activity. FIT-14's
+    # watched folder does not: it synthesises a dict out of a file and a
+    # timestamp, so its `type` is a default rather than a reading and its
+    # `source` describes the reader rather than the row. Those are claims only an
+    # upstream read can make, and this path routinely lands on a row the poll
+    # already created — relabelling a Zwift ride as an outdoor `Ride` off
+    # `local_file` is the same lie as renaming it to the filename.
+    upstream_read = external_ref is not None
+
+    # FIT-07 follows the discipline the row will actually have, which is not this
+    # call's when this call is not the one allowed to set it. Reading the stored
+    # value rather than assuming: a golf round matched on content hash must not
+    # acquire power figures from a scan that thinks everything is a ride.
+    effective = discipline
+    if session_id is not None and not upstream_read:
+        effective = stored_discipline(conn, session_id) or discipline
+
+    # FIT-07: a golf round or a gym session gets no power figures even if the
+    # device recorded some.
+    if not uses_power_analysis(effective):
+        parsed.avg_power_w = parsed.np_power_w = parsed.max_power_w = None
 
     derived = derived_fields(activity)
 
@@ -286,7 +311,7 @@ def ingest(
 
     with conn.transaction(), conn.cursor() as cur:
         if session_id is not None:
-            cur.execute(update_statement(parsed, discipline, derived), values)
+            cur.execute(update_statement(parsed, effective, derived, upstream_read), values)
             return Ingested(session_id, created=False, reason="matched an existing session")
 
         cur.execute(INSERT, values)
@@ -326,7 +351,9 @@ INSERT = """
 """
 
 
-def update_statement(parsed: parse.Parsed, discipline: str, derived: dict[str, Any]) -> str:
+def update_statement(
+    parsed: parse.Parsed, discipline: str, derived: dict[str, Any], upstream_read: bool
+) -> str:
     """The update, with each block written only if this call has one.
 
     A call with no file and no streams has nothing to say about the values FIT-03
@@ -348,13 +375,16 @@ def update_statement(parsed: parse.Parsed, discipline: str, derived: dict[str, A
     load rollups sum. The coach would then quote a seven day load that is short
     by a ride nothing appears to be missing from. `analyzed_at` and
     `derived_provisional` describe that block, so they move with it.
+
+    What the row *is* — its source, its type, whether the coach wrote it — is
+    left to a call that read the platform. `discipline` is the one that bites:
+    the watched folder labels every file a ride, so a golf round matched on
+    content hash used to come back a ride, take power figures FIT-07 exists to
+    withhold, and start being scored for compliance.
     """
     sets = [
         "external_ref = coalesce(%(external_ref)s, external_ref)",
         "content_hash = coalesce(%(content_hash)s, content_hash)",
-        "source = %(source)s",
-        "discipline = %(discipline)s",
-        "activity_type = %(activity_type)s",
         "name = coalesce(%(upstream_name)s, name, %(stem)s)",
         "started_at = %(started_at)s",
         "local_date = %(local_date)s",
@@ -364,10 +394,16 @@ def update_statement(parsed: parse.Parsed, discipline: str, derived: dict[str, A
         "duration_s = coalesce(%(duration_s)s, duration_s)",
         "distance_m = coalesce(%(distance_m)s, distance_m)",
         "elevation_m = coalesce(%(elevation_m)s, elevation_m)",
-        "coach_authored = %(coach_authored)s",
         "backfilled = %(backfilled)s",
         "paired_event_id = coalesce(%(paired_event_id)s, paired_event_id)",
     ]
+    if upstream_read:
+        sets += [
+            "source = %(source)s",
+            "discipline = %(discipline)s",
+            "activity_type = %(activity_type)s",
+            "coach_authored = %(coach_authored)s",
+        ]
     if derived:
         sets += [
             "derived = %(derived)s",
