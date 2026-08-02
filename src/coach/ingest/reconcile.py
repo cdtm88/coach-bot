@@ -18,6 +18,7 @@ import psycopg
 
 from coach import feeds as feedmod
 from coach.ingest import activities as actmod
+from coach.ingest import archive as archivemod
 from coach.ingest import client as clientmod
 
 log = logging.getLogger(__name__)
@@ -164,6 +165,12 @@ def run(
         except Exception as exc:  # noqa: BLE001 - one bad activity must not stop the run
             outcome.errors.append(f"{activity_id}: {exc}")
             continue
+
+        # FIT-15. The bytes were already paid for above; throwing them away after
+        # parsing left the permanent archive holding only what the watched folder
+        # happened to see, on the path that ingests almost everything.
+        if file_bytes:
+            archivemod.keep_original(conn, activity_id, file_bytes, result.session_id)
 
         if result.created:
             outcome.created += 1

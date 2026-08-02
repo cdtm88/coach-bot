@@ -223,7 +223,49 @@ def test_a_missing_original_file_costs_one_extra_call_and_no_more(
     assert client.calls == ["activity", "original_file", "streams"], client.calls
 
 
-# --- FIT-15: the webhook path archives what it downloads --------------------
+# --- FIT-15: every path archives what it downloads --------------------------
+
+
+def test_the_poll_archives_what_it_downloads(conn: psycopg.Connection, sandbox: Path) -> None:
+    """FIT-15 on the path that ingests almost everything.
+
+    Only the webhook drain used to archive. Without a registered app the drain
+    never runs, so the poll fetched each original to parse it and dropped the
+    bytes on the floor — leaving the permanent archive holding nothing but what
+    the watched folder happened to see, on a system whose whole reason for
+    keeping a local copy is that upstream can delete its own.
+    """
+    (sandbox / "inbox").mkdir()
+    service.poll(conn, Upstream([activity()], {"i1001": ride_fit()}), DUBAI)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("select path, external_ref, session_id from fit_archive")
+        row = cur.fetchone()
+    assert row is not None, "the poll downloaded the original and threw it away"
+    assert row["external_ref"] == "i1001"
+    assert row["session_id"] is not None
+    assert Path(row["path"]).read_bytes() == ride_fit()
+
+
+def test_the_poll_and_the_folder_do_not_archive_the_same_bytes_twice(
+    conn: psycopg.Connection, sandbox: Path
+) -> None:
+    """The same ride reaching both paths is one archive row and one session."""
+    inbox = sandbox / "inbox"
+    inbox.mkdir()
+    (inbox / "2026-07-27-181000.fit").write_bytes(ride_fit())
+
+    service.poll(conn, Upstream([activity()], {"i1001": ride_fit()}), DUBAI)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("select count(*) as n from fit_archive")
+        assert cur.fetchone()["n"] == 1
+        cur.execute("select count(*) as n from sessions")
+        assert cur.fetchone()["n"] == 1
+        cur.execute("select name from sessions")
+        assert cur.fetchone()["name"] == "Tempus Fugit"
 
 
 def test_a_downloaded_file_lands_in_the_archive(

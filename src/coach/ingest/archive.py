@@ -14,6 +14,7 @@ file.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -60,6 +61,36 @@ def register(conn: psycopg.Connection, path: Path, data: bytes) -> Discovered:
             (str(path), sha, len(data)),
         )
     return Discovered(path, sha, len(data))
+
+
+def archive_folder() -> Path:
+    return Path(os.environ.get("COACH_FIT_ARCHIVE", "var/fit-archive"))
+
+
+def keep_original(
+    conn: psycopg.Connection, activity_id: str, data: bytes, session_id: int | None
+) -> None:
+    """FIT-15: keep the downloaded original, keyed to the upstream activity.
+
+    Every path that downloads a file calls this, and that is the requirement
+    rather than tidiness. Without a registered app the poll is the primary ingest
+    path, so a copy that only the webhook drain made was a copy of almost
+    nothing: the poll fetched the bytes to parse them and dropped them on the
+    floor, and the archive that exists because upstream can delete its own data
+    held only the files that arrived through the watched folder.
+    """
+    folder = archive_folder()
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{activity_id}.fit"
+    if not path.exists():
+        path.write_bytes(data)
+    register(conn, path, data)
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "update fit_archive set session_id = coalesce(session_id, %s), "
+            "external_ref = coalesce(external_ref, %s) where sha256 = %s",
+            (session_id, activity_id, parse.content_hash(data)),
+        )
 
 
 def ingest_file(

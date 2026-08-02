@@ -673,7 +673,15 @@ class FakeIntervals:
 
 
 def test_reconcile_restores_a_deleted_session(conn: psycopg.Connection) -> None:
-    """FIT-11: deleting a session row and running reconcile restores it."""
+    """FIT-11: deleting a session row and running reconcile restores it.
+
+    The archive row is detached first, the same way
+    `test_the_archive_survives_an_upstream_deletion` does it. Now that the poll
+    archives what it downloads, `fit_archive.session_id` references the row, and
+    the foreign key refuses a bare delete — which is FIT-15 working rather than
+    something to route around. Nothing in `src/` deletes a session; this test is
+    simulating one.
+    """
     fake = FakeIntervals([activity()], {"i1001": ride_fit()})
 
     reconcile.run(conn, fake, DUBAI, date(2026, 7, 1))
@@ -683,6 +691,7 @@ def test_reconcile_restores_a_deleted_session(conn: psycopg.Connection) -> None:
         original = cur.fetchone()["id"]
 
     with conn.transaction(), conn.cursor() as cur:
+        cur.execute("update fit_archive set session_id = null where session_id = %s", (original,))
         cur.execute("delete from sessions where id = %s", (original,))
     conn.commit()
 
