@@ -4,9 +4,11 @@ CONS-01: a nightly job at 03:00 in the athlete's configured timezone.
 MEM-12: a nightly export of the active fact set alongside a pg_dump.
 CONS-07: unconfirmed facts lose confidence by category half life.
 
-Three jobs, one clock, and a ledger so the clock can be crude. The loop wakes
-every few minutes, asks which jobs are due for today's local date, and runs the
-ones that have not run. That is deliberately not cron: a process that was down at
+Jobs, one clock, and a ledger so the clock can be crude. The loop wakes every
+few minutes, asks which jobs are due, and runs the ones that have not run. Each
+job carries its own `Schedule`, because P10's do not share an hour: the morning
+message and the evening follow-up are about today, and consolidation at 03:00 is
+about yesterday. That is deliberately not cron: a process that was down at
 03:00 must still consolidate when it comes back, and OBS-08 caps the retries
 rather than the schedule.
 
@@ -24,6 +26,7 @@ import os
 import signal
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
@@ -46,6 +49,94 @@ TICK_S = 300
 
 # OBS-08: at most one run per date and at most one retry on failure.
 MAX_ATTEMPTS = 2
+
+
+@dataclass(frozen=True)
+class Schedule:
+    """When a job is due, and which local date it is *about*.
+
+    Those are two different questions, and conflating them is what made this a
+    dataclass rather than an hour. Consolidation fires at 03:00 on Tuesday and is
+    about Monday. The morning message fires at 06:00 on Tuesday and is about
+    Tuesday. Both are once-a-day jobs on the same ledger, so the date they key on
+    has to be the date they are about, or a job about today would collide with
+    yesterday's row.
+
+    `weekday` is the day the job *fires*, Monday 0 through Sunday 6, so a weekly
+    review keeps a normal `covers` — the Sunday review is about the week ending
+    that day, and its ledger key is that Sunday.
+    """
+
+    hour: int
+    minute: int = 0
+    weekday: int | None = None
+    covers: str = "yesterday"
+
+    def due(self, now: datetime, tz: Any) -> date | None:
+        """The local date this job is about, if its time has passed today."""
+        local = now.astimezone(tz)
+        if self.weekday is not None and local.date().weekday() != self.weekday:
+            return None
+        if local.time() < time(self.hour, self.minute):
+            return None
+        if self.covers == "today":
+            return local.date()
+        return local.date() - timedelta(days=1)
+
+
+# CONS-01's slot, and the default for anything that does not say otherwise.
+NIGHTLY = Schedule(hour=CONSOLIDATION_HOUR)
+
+
+@dataclass(frozen=True)
+class Job:
+    run: Callable[[psycopg.Connection, date], Any]
+    schedule: Schedule = NIGHTLY
+
+
+def _as_job(spec: Job | Callable[[psycopg.Connection, date], Any], schedule: Schedule) -> Job:
+    """Accept a bare callable, which is what every caller before P10 passes."""
+    return spec if isinstance(spec, Job) else Job(run=spec, schedule=schedule)
+
+
+# NOTIF-05: the times move without a code change. Read at call time rather than
+# at import, so a test can set them and a container restart is the only thing
+# needed to change them in a deployment.
+def _int_env(name: str, default: int, lo: int, hi: int) -> int:
+    """An out-of-range or unparseable value falls back rather than raising.
+
+    A typo in a notification time must not stop the scheduler from
+    consolidating. The cost of the wrong hour is a message at the wrong time;
+    the cost of refusing to start is the whole nightly pass.
+    """
+    raw = os.environ.get(name, "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    if not lo <= value <= hi:
+        log.warning("%s=%s out of range %d-%d; using %d", name, value, lo, hi, default)
+        return default
+    return value
+
+
+def morning_schedule() -> Schedule:
+    """NOTIF-01, and about today rather than yesterday — it names today's session."""
+    return Schedule(hour=_int_env("COACH_MORNING_HOUR", 6, 0, 23), covers="today")
+
+
+def follow_up_schedule() -> Schedule:
+    """NOTIF-02's 21:00. Also about today: the session it is asking after is today's."""
+    return Schedule(hour=_int_env("COACH_FOLLOW_UP_HOUR", 21, 0, 23), covers="today")
+
+
+def review_schedule() -> Schedule:
+    """REV-01. Sunday by default, and about the Sunday it fires on."""
+    return Schedule(
+        hour=_int_env("COACH_REVIEW_HOUR", 18, 0, 23),
+        weekday=_int_env("COACH_REVIEW_WEEKDAY", 6, 0, 6),
+        covers="today",
+    )
 
 
 def _ensure_ledger(conn: psycopg.Connection) -> None:
@@ -116,30 +207,34 @@ def due(now: datetime, tz: Any, hour: int = CONSOLIDATION_HOUR) -> date | None:
     a process started at midnight waits rather than consolidating a day that is
     still happening.
     """
-    local = now.astimezone(tz)
-    if local.time() < time(hour):
-        return None
-    return local.date() - timedelta(days=1)
+    return Schedule(hour=hour).due(now, tz)
 
 
 def run_due(
     conn: psycopg.Connection,
     now: datetime,
     tz: Any,
-    jobs: dict[str, Callable[[psycopg.Connection, date], Any]],
+    jobs: dict[str, Job | Callable[[psycopg.Connection, date], Any]],
     hour: int = CONSOLIDATION_HOUR,
 ) -> dict[str, str]:
-    """Run whichever jobs are due and unclaimed. Returns what happened to each."""
-    target = due(now, tz, hour)
-    if target is None:
-        return {}
+    """Run whichever jobs are due and unclaimed. Returns what happened to each.
 
+    Each job is asked for its own due date rather than sharing one, because
+    P10's jobs do not share an hour: the morning message at 06:00 and the
+    follow-up at 21:00 are both about today, and consolidation at 03:00 is about
+    yesterday. A job whose time has not come is simply absent from the result.
+    """
+    default = Schedule(hour=hour)
     outcomes: dict[str, str] = {}
-    for name, job in jobs.items():
+    for name, spec in jobs.items():
+        job = _as_job(spec, default)
+        target = job.schedule.due(now, tz)
+        if target is None:
+            continue
         if not claim(conn, name, target):
             continue
         try:
-            job(conn, target)
+            job.run(conn, target)
         except Exception as exc:  # noqa: BLE001 - one failing job must not stop the rest
             log.exception("%s failed for %s", name, target)
             finish(conn, name, target, ok=False, error=str(exc))
@@ -255,14 +350,22 @@ def consolidation_job(
 
 def serve(
     stop: threading.Event,
-    jobs: dict[str, Callable[[psycopg.Connection, date], Any]],
+    jobs: dict[str, Job | Callable[[psycopg.Connection, date], Any]],
     connect=db.connect,
     tz=None,
     tick_s: int = TICK_S,
 ) -> None:
     """Wake, ask what is due, run it, sleep. Until `stop`."""
     zone = tz or clock.configured_tz()
-    log.info("scheduler running %s at %02d:00 local", sorted(jobs), CONSOLIDATION_HOUR)
+    for name, spec in sorted(jobs.items()):
+        schedule = _as_job(spec, NIGHTLY).schedule
+        log.info(
+            "scheduled %s at %02d:%02d local%s",
+            name,
+            schedule.hour,
+            schedule.minute,
+            "" if schedule.weekday is None else f" on weekday {schedule.weekday}",
+        )
 
     while not stop.is_set():
         try:

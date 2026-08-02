@@ -556,6 +556,94 @@ def test_a_missed_night_runs_when_the_process_comes_back(conn) -> None:
     assert ran == [date(2026, 7, 27)]
 
 
+def test_a_job_can_be_about_today_rather_than_yesterday(conn) -> None:
+    """NOTIF-01's morning message names *today's* session, not yesterday's.
+
+    Consolidation's "the day that finished" is right for consolidation and wrong
+    for everything P10 adds, which is why the hour became a `Schedule`.
+    """
+    ran: list[date] = []
+    job = scheduler.Job(
+        run=lambda c, d: ran.append(d),
+        schedule=scheduler.Schedule(hour=6, covers="today"),
+    )
+    at_seven = datetime(2026, 7, 28, 7, 0, tzinfo=DUBAI).astimezone(UTC)
+
+    scheduler.run_due(conn, at_seven, DUBAI, {"morning": job})
+
+    assert ran == [date(2026, 7, 28)]
+
+
+def test_two_jobs_at_different_hours_do_not_wait_for_each_other(conn) -> None:
+    """The reason each job carries its own schedule rather than sharing one.
+
+    A single due date for the whole tick would mean the 21:00 follow-up either
+    dragged the 06:00 message with it or was held back by it.
+    """
+    ran: list[str] = []
+    jobs = {
+        "morning": scheduler.Job(
+            run=lambda c, d: ran.append("morning"),
+            schedule=scheduler.Schedule(hour=6, covers="today"),
+        ),
+        "follow_up": scheduler.Job(
+            run=lambda c, d: ran.append("follow_up"),
+            schedule=scheduler.Schedule(hour=21, covers="today"),
+        ),
+    }
+    midday = datetime(2026, 7, 28, 12, 0, tzinfo=DUBAI).astimezone(UTC)
+
+    scheduler.run_due(conn, midday, DUBAI, jobs)
+
+    assert ran == ["morning"]
+
+
+def test_a_today_job_and_a_yesterday_job_keep_separate_ledger_rows(conn) -> None:
+    """They key on the date they are *about*, so the same tick cannot collide."""
+    ran: list[tuple[str, date]] = []
+    jobs = {
+        "consolidate": lambda c, d: ran.append(("consolidate", d)),
+        "morning": scheduler.Job(
+            run=lambda c, d: ran.append(("morning", d)),
+            schedule=scheduler.Schedule(hour=6, covers="today"),
+        ),
+    }
+    at_seven = datetime(2026, 7, 28, 7, 0, tzinfo=DUBAI).astimezone(UTC)
+
+    scheduler.run_due(conn, at_seven, DUBAI, jobs)
+
+    assert sorted(ran) == [("consolidate", date(2026, 7, 27)), ("morning", date(2026, 7, 28))]
+
+
+def test_a_weekly_job_only_fires_on_its_weekday(conn) -> None:
+    """REV-01. 2026-07-28 is a Tuesday; 2026-08-02 is a Sunday."""
+    ran: list[date] = []
+    review = scheduler.Job(
+        run=lambda c, d: ran.append(d),
+        schedule=scheduler.Schedule(hour=18, weekday=6, covers="today"),
+    )
+
+    tuesday = datetime(2026, 7, 28, 19, 0, tzinfo=DUBAI).astimezone(UTC)
+    scheduler.run_due(conn, tuesday, DUBAI, {"review": review})
+    assert ran == []
+
+    sunday = datetime(2026, 8, 2, 19, 0, tzinfo=DUBAI).astimezone(UTC)
+    scheduler.run_due(conn, sunday, DUBAI, {"review": review})
+    assert ran == [date(2026, 8, 2)]
+
+
+def test_the_notification_times_move_without_a_deploy(monkeypatch) -> None:
+    """NOTIF-05, and the fallback that keeps a typo from stopping the nightly pass."""
+    monkeypatch.setenv("COACH_MORNING_HOUR", "5")
+    assert scheduler.morning_schedule().hour == 5
+
+    monkeypatch.setenv("COACH_MORNING_HOUR", "not-an-hour")
+    assert scheduler.morning_schedule().hour == 6
+
+    monkeypatch.setenv("COACH_MORNING_HOUR", "99")
+    assert scheduler.morning_schedule().hour == 6
+
+
 def test_a_failing_job_retries_once_and_then_stops(conn) -> None:
     """OBS-08: "a failing run cannot loop"."""
     attempts: list[int] = []
