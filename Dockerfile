@@ -23,7 +23,14 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 COPY README.md ./
 COPY src ./src
-RUN uv sync --frozen --no-dev
+# `--no-editable` is load-bearing, not a preference. Without it `uv sync`
+# installs the project the way it does for development — a finder in
+# site-packages pointing back at /app/src — and the runtime stage below copies
+# the virtualenv without the source tree, so every entry point dies with
+# `ModuleNotFoundError: No module named 'coach'` at container start. Building it
+# into site-packages makes the venv self-contained, which is the only reason
+# copying just the venv works at all.
+RUN uv sync --frozen --no-dev --no-editable
 
 # --- runtime -----------------------------------------------------------------
 

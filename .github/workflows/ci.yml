@@ -54,3 +54,43 @@ jobs:
 
       - name: Test
         run: pytest -q
+
+  # The suite cannot see this class of failure. Every test imports `coach` from
+  # the checkout, so a Dockerfile that ships a virtualenv the package is not
+  # actually installed into passes everything and then dies at container start
+  # with `ModuleNotFoundError`. Found the hard way on a real deploy.
+  image:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: docker build -t coach-bot:ci .
+
+      # Importing every entry point's module, rather than just `coach`, so a
+      # dependency resolved for the dev extra but missing from the runtime venv
+      # is caught here too.
+      - name: The virtualenv is self-contained
+        run: |
+          docker run --rm coach-bot:ci python -c "
+          import coach.migrate, coach.seed, coach.ingest.server
+          import coach.runtime.agent, coach.runtime.scheduler"
+
+      - name: Every entry point resolves
+        run: |
+          docker run --rm coach-bot:ci sh -c '
+            for exe in coach-migrate coach-seed coach-ingest coach-agent coach-scheduler; do
+              command -v "$exe" >/dev/null || { echo "missing: $exe"; exit 1; }
+            done'
+
+      - name: The data the image is expected to carry is present
+        run: |
+          docker run --rm coach-bot:ci sh -c '
+            test -f /app/prompts/persona.md &&
+            test -f /app/seeds/athlete.json &&
+            test "$(ls /app/migrations/*.sql | wc -l)" -ge 13'
+
+      - name: It does not run as root
+        run: |
+          test "$(docker run --rm coach-bot:ci id -u)" = 10001
