@@ -205,13 +205,20 @@ def recompute_rollups(conn: psycopg.Connection) -> int:
     """FIT-13: rebuild derived rollups now rather than waiting for the night.
 
     MEM-08 requires these to be SQL rather than model arithmetic, so this is one
-    statement. Only the load figures are populated here; weight trend, adherence
-    and recovery deviation arrive with their own feeds in P04 and P05.
+    statement. Weight trend and recovery deviation arrive with their own feeds.
+
+    **Adherence excludes break days** (BREAK-02). A prescription suspended by a
+    break is not counted in either the numerator or the denominator, so a
+    fortnight in Italy leaves the rate where it was rather than at zero. That is
+    a stronger statement than "suspended sessions are not misses": counting them
+    as offered-and-not-taken would be just as wrong, and it is the denominator
+    that makes a rate lie convincingly.
     """
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             """
-            insert into rollups (as_of, load_7d, load_28d, gym_session_count, computed_at)
+            insert into rollups
+                (as_of, load_7d, load_28d, gym_session_count, adherence_rate, computed_at)
             select d.day,
                    (select coalesce(sum((s.derived->>'icu_training_load')::numeric), 0)
                       from sessions s
@@ -225,12 +232,22 @@ def recompute_rollups(conn: psycopg.Connection) -> int:
                      where s.discipline in ('weighttraining', 'workout')
                        and s.local_date > d.day - interval '7 days'
                        and s.local_date <= d.day),
+                   (select case when count(*) = 0 then null
+                                else count(*) filter (where p.status = 'completed')::numeric
+                                     / count(*)
+                           end
+                      from prescriptions p
+                     where p.status in ('completed', 'missed')
+                       and (p.planned_for at time zone 'UTC')::date
+                             > d.day - interval '28 days'
+                       and (p.planned_for at time zone 'UTC')::date <= d.day),
                    now()
               from (select distinct local_date as day from sessions) d
             on conflict (as_of) do update set
                 load_7d = excluded.load_7d,
                 load_28d = excluded.load_28d,
                 gym_session_count = excluded.gym_session_count,
+                adherence_rate = excluded.adherence_rate,
                 computed_at = excluded.computed_at
             """
         )

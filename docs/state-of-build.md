@@ -26,11 +26,12 @@
 | — | P02's proposer, so consolidation actually runs (CONS-02, PR #13) | merged |
 | P08 | Publishing upstream and athlete edit detection (PLAN-01 to PLAN-12) | merged (PR #16) |
 | P09 | Bounded mid-week adjustment authority (ADJ-01 to ADJ-08) | merged (PR #17) |
+| P10 | The weekly review and the daily rhythm (REV, NOTIF, BREAK, NUT, LOG) | built |
 | — | Docker image, compose stack, MEM-12's pg_dump sidecar (PR #18) | merged |
 | — | libpq connection route, for a Postgres deployed separately (PR #19) | merged |
 | — | The four defects that only appear once deployed (PR #20) | merged |
 
-643 tests, all against a real Postgres. Schema is at migration 013; the
+731 tests, all against a real Postgres. Schema is at migration 014; the
 scheduler's own ledger is created on first use rather than as a migration,
 because it is process bookkeeping rather than part of the memory design.
 
@@ -43,11 +44,12 @@ server against a Postgres it did not deploy, and a message to the bot gets a
 reply. That is the first time the whole path has existed at once: Telegram, the
 allowlist, the database, the model, and back.
 
-Next is **P10** — the weekly review and the daily rhythm (REV, NOTIF, BREAK, NUT,
-LOG). Nothing is gated on a live check any more: V1 and V4 are both run and
-recorded below.
+**P10 closes the loop.** The coach now speaks first: a morning message, one
+evening follow-up when a session has left no trace, and a review every Sunday.
+Gym sessions and golf rounds are captured from chat and land in the same rollups
+a Garmin upload would. Breaks suspend the plan rather than scoring it as missed.
 
-Then **P11** — collapsing the running containers, described under "What runs".
+Next is **P11** — collapsing the running containers, described under "What runs".
 
 Two soak gates are waiting on the athlete and neither blocks anything: HealthBridge
 writing body mass, and the secret iCal addresses in `CALENDAR_ICS_URLS`. Both
@@ -134,6 +136,54 @@ Acceptance, when it is written:
   offset unadvanced for any turn that did not complete.
 - The three console scripts still exist and still work, because running one loop
   alone is how they are debugged.
+
+### P10: the coach speaks first
+
+Everything before this was reactive — the athlete wrote, or a file arrived, and
+the system responded. P10 is the first phase where the coach initiates, and
+almost all of its difficulty is in *not* doing so.
+
+**NOTIF-02 is a list of conditions under which a message would be wrong.** An
+activity already landed; a break is running; nothing was prescribed; or the
+platform recorded training load for the day with no activity attached, which
+means the ride happened and the upload did not. `load_recorded_on` returns three
+values and only `True` suppresses — `None` is the feed having nothing for the
+day, which is the coach not knowing rather than the athlete not training. Both
+branches have a test, because a `None` read as either boolean is a bug that
+looks correct.
+
+**The scheduler had to grow up.** `due()` hardcoded 03:00 and always targeted
+yesterday. That is right for consolidation and wrong for everything here, so a
+job now carries a `Schedule` — hour, optional weekday, and whether it covers
+today or yesterday — and the date a job is *about* stays the ledger key, so a
+job about today cannot collide with yesterday's row. NOTIF-02's "fires once" is
+that ledger rather than any flag, which is why `follow_up` can be a pure
+function of the day.
+
+**Suspension is a third prescription status.** 'missed' feeds the ADJ-01
+triggers and depresses adherence; 'cancelled' says the athlete declined. Neither
+is true of a week the coach agreed to. And break days leave the adherence
+*denominator*, not just the numerator — counting a suspended session as
+offered-and-not-taken would be exactly as wrong as counting it as a miss.
+
+**NUT-03 falls out of the grouping rather than being enforced.** A day with no
+meals produces no row in the per-day subquery, so `avg` never sees it. Counting
+it as zero would take extra code. Coverage travels with every average anyway,
+because excluding gap days is right and misleading on its own — two well-fed
+days out of seven should not read as a well-fed week.
+
+**Coming back from a break is a proposal, not an application.** The governing
+asymmetry lets the system reduce load unasked; a re-entry increases it from zero,
+so it is the athlete's decision by construction. The ladder's numbers are
+invented and say so; the tests assert the property the PRD actually fixes, which
+is that every step starts below the pre-break week and rises.
+
+**Two bugs the tests found, both mine.** `store` marked a break's re-entry as
+proposed after the early return for "no active block", so a deployment without
+one would re-propose the same re-entry every Sunday. And `push_upstream` called
+`create_manual_activity` on a client whose method is `create_manual` — the fake
+answered to the wrong name and every test in the file passed. There is now a
+test asserting the fake and the real client share the surface.
 
 ### P09: the asymmetry, in three modules
 

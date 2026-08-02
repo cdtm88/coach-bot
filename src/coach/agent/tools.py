@@ -19,13 +19,14 @@ import psycopg
 from coach import clock
 from coach.blocks import document as blockmod
 from coach.calendars import availability as calmod
+from coach.health import breaks as breakmod
+from coach.logbook import capture as capturemod
 from coach.memory import facts as factmod
 from coach.memory import notes as notemod
 from coach.memory import state as statemod
 
 # Phase that lands each deferred tool, surfaced in its unavailable result.
 DEFERRED = {
-    "log_session": "P10",
     "get_sessions": "P03",
     "write_session_events": "P08",
 }
@@ -105,6 +106,28 @@ SCHEMAS: list[dict[str, Any]] = [
                 },
             },
             "required": ["discipline", "occurred_on", "detail"],
+        },
+    },
+    {
+        "name": "set_break",
+        "description": (
+            "Record a scheduled break for holiday, travel or illness. Suspends the "
+            "prescriptions it covers and cancels their planned events. Illness breaks "
+            "are open ended by default and never resume on their own."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["holiday", "travel", "illness"]},
+                "starts_on": {"type": "string", "format": "date"},
+                "ends_on": {
+                    "type": "string",
+                    "format": "date",
+                    "description": "Omit for an open ended break.",
+                },
+                "reason": {"type": "string"},
+            },
+            "required": ["kind", "starts_on"],
         },
     },
     {
@@ -260,6 +283,54 @@ def dispatch(conn: psycopg.Connection, name: str, arguments: dict[str, Any]) -> 
             origin="in_turn",
         )
         return {"queued": True, "pending_write_id": queued}
+
+    if name == "log_session":
+        # LOG-01 to LOG-05. The local record first and the upstream write not at
+        # all from here: LOG-08 forbids the conversation waiting on a network
+        # call, so `push_upstream` is the ingest loop's job rather than the
+        # turn's.
+        try:
+            captured = capturemod.record(
+                conn,
+                arguments["discipline"],
+                date.fromisoformat(arguments["occurred_on"]),
+                arguments.get("detail") or {},
+                clock.configured_tz(),
+            )
+        except capturemod.Incomplete as exc:
+            # LOG-03 and LOG-04: the one question that would make this
+            # recordable, handed back so the coach asks it rather than
+            # inventing a value.
+            return {"recorded": False, "ask": exc.question}
+        return {
+            "recorded": True,
+            "session_id": captured.session_id,
+            "load": float(captured.load),
+            "closed_prescription_id": captured.prescription_id,
+        }
+
+    if name == "set_break":
+        # BREAK-01's conversational front end, and BREAK-02 in the same call:
+        # a break that is recorded but leaves the week's prescriptions live
+        # would have the coach messaging about sessions it has agreed are not
+        # happening. The upstream cancellation is not done here (LOG-08's
+        # reasoning applies equally) — the sweep removes the orphans.
+        starts_on = date.fromisoformat(arguments["starts_on"])
+        ends_on = arguments.get("ends_on")
+        break_id = breakmod.create(
+            conn,
+            arguments["kind"],
+            starts_on,
+            date.fromisoformat(ends_on) if ends_on else None,
+            arguments.get("reason"),
+        )
+        created = breakmod.active_on(conn, starts_on)
+        suspended = breakmod.suspend(conn, created) if created else None
+        return {
+            "break_id": break_id,
+            "suspended": len(suspended.prescription_ids) if suspended else 0,
+            "open_ended": ends_on is None or arguments["kind"] == "illness",
+        }
 
     if name == "get_calendar":
         # CALR-05: what the feed published, labelled as such. The tool result
