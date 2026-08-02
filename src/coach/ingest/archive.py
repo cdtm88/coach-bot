@@ -14,6 +14,7 @@ file.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 
+from coach import feeds as feedmod
 from coach.ingest import activities as actmod
 from coach.ingest import parse
 
@@ -61,6 +63,44 @@ def register(conn: psycopg.Connection, path: Path, data: bytes) -> Discovered:
     return Discovered(path, sha, len(data))
 
 
+def archive_folder() -> Path:
+    return Path(os.environ.get("COACH_FIT_ARCHIVE", "var/fit-archive"))
+
+
+def keep_original(
+    conn: psycopg.Connection, activity_id: str, data: bytes, session_id: int | None
+) -> None:
+    """FIT-15: keep the downloaded original, keyed to the upstream activity.
+
+    Every path that downloads a file calls this, and that is the requirement
+    rather than tidiness. Without a registered app the poll is the primary ingest
+    path, so a copy that only the webhook drain made was a copy of almost
+    nothing: the poll fetched the bytes to parse them and dropped them on the
+    floor, and the archive that exists because upstream can delete its own data
+    held only the files that arrived through the watched folder.
+
+    Stored decompressed. intervals.icu serves the original gzipped, so the file
+    written under `<id>.fit` was a gzip stream wearing a FIT extension — and
+    FIT-16 reads these back out and posts them to the upload endpoint, where the
+    name is what says how to read the bytes. `size_bytes` was the compressed
+    length against a hash of the uncompressed content, which is two answers to
+    one question.
+    """
+    canonical = parse.decompressed(data)
+    folder = archive_folder()
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{activity_id}.fit"
+    if not path.exists():
+        path.write_bytes(canonical)
+    register(conn, path, canonical)
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "update fit_archive set session_id = coalesce(session_id, %s), "
+            "external_ref = coalesce(external_ref, %s) where sha256 = %s",
+            (session_id, activity_id, parse.content_hash(canonical)),
+        )
+
+
 def ingest_file(
     conn: psycopg.Connection, path: Path, tz: ZoneInfo, data: bytes | None = None
 ) -> int | None:
@@ -85,15 +125,29 @@ def ingest_file(
         log.warning("skipping %s: no timestamps, so FIT-10 cannot date it", path)
         return None
 
+    # The file's own sport, which is the only thing here that knows. Falling back
+    # to a ride only when the file never says, and saying so, because that branch
+    # is a guess and a guess should be visible in the log rather than in the data
+    # alone.
+    kind = actmod.type_of_file(parsed)
+    if kind is None:
+        kind = actmod.UNDECLARED_LOCAL_TYPE
+        log.info("%s declares no sport; ingesting it as %s", path, kind)
+
     # Synthesised to match what the upstream path builds, so both routes converge
     # on one ingest function rather than two that drift.
+    #
+    # The stem goes in as a fallback and not as `name`. This path routinely lands
+    # on a row the poll already created from the same bytes, and a filename is
+    # not a correction to the title the platform gave the ride.
     synthetic = {
         "id": None,
-        "type": "Ride",
-        "name": path.stem,
+        "type": kind,
         "start_date_local": parsed.started_at.isoformat(),
     }
-    result = actmod.ingest(conn, synthetic, tz, file_bytes=payload, source="local_file")
+    result = actmod.ingest(
+        conn, synthetic, tz, file_bytes=payload, source="local_file", fallback_name=path.stem
+    )
 
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
@@ -104,9 +158,16 @@ def ingest_file(
 
 
 def scan(conn: psycopg.Connection, folder: Path, tz: ZoneInfo) -> list[int]:
-    """Ingest every unseen FIT file in the watched folder."""
+    """Ingest every unseen FIT file in the watched folder.
+
+    OBS-05's `fit_archive` feed is stamped here, and it is the readability of the
+    folder that is being stamped rather than the arrival of a file. A fortnight
+    with no rides must not read as a broken archive — a sync that stopped
+    mounting the directory must.
+    """
     if not folder.exists():
         log.info("watched folder %s does not exist yet", folder)
+        feedmod.record_error(conn, feedmod.FIT_ARCHIVE, f"watched folder {folder} does not exist")
         return []
 
     ingested = []
@@ -116,6 +177,8 @@ def scan(conn: psycopg.Connection, folder: Path, tz: ZoneInfo) -> list[int]:
         session_id = ingest_file(conn, path, tz)
         if session_id is not None:
             ingested.append(session_id)
+
+    feedmod.record_success(conn, feedmod.FIT_ARCHIVE)
     return ingested
 
 

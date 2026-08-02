@@ -175,6 +175,222 @@ def test_parsed_values_are_computed_not_borrowed(conn: psycopg.Connection) -> No
     assert float(session["avg_power_w"]) != session["derived"]["icu_average_watts"]
 
 
+def test_a_reingest_with_no_file_keeps_the_numbers_it_already_parsed(
+    conn: psycopg.Connection,
+) -> None:
+    """An update that read no samples has nothing to say about the parsed columns.
+
+    It used to say it anyway: `Parsed()` is all nulls, and the update wrote every
+    one of them. `reconcile.run(fetch_files=False)` did this by construction, and
+    any re-ingest arriving while the original is briefly unavailable does it by
+    accident — the ride keeps its row and silently loses its power, heart rate and
+    cadence. The coach then reads a ride with no numbers and describes our write
+    rather than the ride.
+    """
+    first = activities.ingest(conn, activity(), DUBAI, file_bytes=ride_fit())
+    conn.commit()
+
+    activities.ingest(conn, activity(), DUBAI)  # no file, no streams
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "select avg_power_w, np_power_w, avg_hr, max_hr, avg_cadence, sample_count, "
+            "       duration_s, distance_m from sessions where id = %s",
+            (first.session_id,),
+        )
+        row = cur.fetchone()
+    assert float(row["avg_power_w"]) == 150.0
+    assert row["np_power_w"] is not None
+    assert row["avg_hr"] == 140
+    assert row["max_hr"] == 150
+    assert row["avg_cadence"] is not None
+    assert row["sample_count"] == 120
+    assert row["duration_s"] is not None
+    assert row["distance_m"] is not None
+
+
+def test_a_reparse_that_read_samples_writes_its_nulls(conn: psycopg.Connection) -> None:
+    """The asymmetry, and it is deliberate.
+
+    A file with no power meter is a positive statement that this ride had no
+    power. Coalescing it the way the no-samples case does would leave the earlier
+    figure standing on a ride that never produced one.
+    """
+    first = activities.ingest(conn, activity(), DUBAI, file_bytes=ride_fit())
+    conn.commit()
+
+    no_power = build_fit(START, heart_rate=[130] * 120, cadence=[85] * 120)
+    activities.ingest(conn, activity(), DUBAI, file_bytes=no_power)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "select avg_power_w, np_power_w, avg_hr from sessions where id = %s",
+            (first.session_id,),
+        )
+        row = cur.fetchone()
+    assert row["avg_power_w"] is None, "the new file says there was no power"
+    assert row["np_power_w"] is None
+    assert row["avg_hr"] == 130
+
+
+def test_reconcile_without_files_does_not_erase_what_it_stored(conn: psycopg.Connection) -> None:
+    """`fetch_files=False` is the configuration that made this reachable."""
+    fake = FakeIntervals([activity()], {"i1001": ride_fit()})
+    reconcile.run(conn, fake, DUBAI, date(2026, 7, 1))
+    conn.commit()
+
+    reconcile.run(conn, fake, DUBAI, date(2026, 7, 1), backfill=True, fetch_files=False)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("select avg_power_w, sample_count from sessions where external_ref = 'i1001'")
+        row = cur.fetchone()
+    assert float(row["avg_power_w"]) == 150.0
+    assert row["sample_count"] == 120
+
+
+def test_a_folder_scan_does_not_relabel_a_row_the_platform_described(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    """The watched folder knows a file and a timestamp. It does not know a type.
+
+    `ingest_file` synthesises `{"type": "Ride", "source": "local_file"}` because
+    that is all it has, and the update wrote both over a row the API had already
+    described. A Zwift ride came back an outdoor one, off a source it never came
+    from.
+    """
+    body = ride_fit()
+    first = activities.ingest(conn, activity(kind="VirtualRide"), DUBAI, file_bytes=body)
+    conn.commit()
+
+    path = tmp_path / "2026-07-27-181000.fit"
+    path.write_bytes(body)
+    archive.ingest_file(conn, path, DUBAI)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "select source, discipline, activity_type from sessions where id = %s",
+            (first.session_id,),
+        )
+        row = cur.fetchone()
+    assert row["source"] == "intervals"
+    assert row["discipline"] == "virtualride"
+    assert row["activity_type"] == "VirtualRide"
+
+
+def test_a_golf_round_does_not_acquire_power_from_a_folder_scan(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    """FIT-07 has to survive the path that thinks everything is a ride.
+
+    This is why the power decision reads the stored discipline rather than this
+    call's. A scan that cannot set the discipline must not get to act as though
+    it had.
+    """
+    body = ride_fit()
+    first = activities.ingest(conn, activity(kind="Golf"), DUBAI, file_bytes=body)
+    conn.commit()
+
+    path = tmp_path / "2026-07-27-181000.fit"
+    path.write_bytes(body)
+    archive.ingest_file(conn, path, DUBAI)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "select discipline, avg_power_w, np_power_w, avg_hr from sessions where id = %s",
+            (first.session_id,),
+        )
+        row = cur.fetchone()
+    assert row["discipline"] == "golf"
+    assert row["avg_power_w"] is None, "FIT-07: a golf round carries no power figures"
+    assert row["np_power_w"] is None
+    assert row["avg_hr"] == 140, "the samples it did read still land"
+
+
+def test_a_folder_scan_does_not_disown_a_coach_authored_session(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    """FIT-17's flag comes from an `external_id` a synthetic dict does not have."""
+    body = ride_fit()
+    first = activities.ingest(
+        conn,
+        activity(external_id=f"{activities.COACH_MARKER}0"),
+        DUBAI,
+        file_bytes=body,
+    )
+    conn.commit()
+
+    path = tmp_path / "2026-07-27-181000.fit"
+    path.write_bytes(body)
+    archive.ingest_file(conn, path, DUBAI)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("select coach_authored from sessions where id = %s", (first.session_id,))
+        assert cur.fetchone()["coach_authored"] is True
+
+
+def test_a_file_with_no_platform_fields_does_not_erase_the_derived_block(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    """The same defect one column over, and this one moves a number the coach quotes.
+
+    A watched-folder file carries no `icu_` fields at all, so its empty derived
+    block used to be written straight over an upstream read — taking
+    `icu_training_load` with it. That is what the load rollups sum, so the seven
+    day load silently drops by a whole ride while every row still looks present.
+    """
+    body = ride_fit()
+    first = activities.ingest(conn, activity(), DUBAI, file_bytes=body)
+    conn.commit()
+
+    path = tmp_path / "2026-07-27-181000.fit"
+    path.write_bytes(body)
+    archive.ingest_file(conn, path, DUBAI)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "select derived, analyzed_at, derived_provisional from sessions where id = %s",
+            (first.session_id,),
+        )
+        row = cur.fetchone()
+    assert row["derived"]["icu_training_load"] == 55
+    assert row["derived"]["icu_ftp"] == 115
+
+
+def test_a_discipline_corrected_upstream_drops_the_power_figures(
+    conn: psycopg.Connection,
+) -> None:
+    """FIT-07 on the update path, not only on the insert.
+
+    A ride retyped as a golf round upstream must not keep the numbers it should
+    never have carried, whether or not this call read any samples.
+    """
+    first = activities.ingest(conn, activity(), DUBAI, file_bytes=ride_fit())
+    conn.commit()
+
+    activities.ingest(conn, activity(kind="Golf"), DUBAI)  # no file this time
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "select discipline, avg_power_w, np_power_w, max_power_w, avg_hr "
+            "from sessions where id = %s",
+            (first.session_id,),
+        )
+        row = cur.fetchone()
+    assert row["discipline"] == "golf"
+    assert row["avg_power_w"] is None
+    assert row["np_power_w"] is None
+    assert row["max_power_w"] is None
+    assert row["avg_hr"] == 140, "FIT-07 is about power, not about the whole row"
+
+
 def test_derived_block_holds_the_platform_fields(conn: psycopg.Connection) -> None:
     result = activities.ingest(conn, activity(), DUBAI, file_bytes=ride_fit())
     conn.commit()
@@ -267,6 +483,36 @@ def test_golf_produces_a_session_and_no_power_analysis(conn: psycopg.Connection)
     assert row["discipline"] == "golf"
     assert row["avg_power_w"] is None, "power figures must not survive on a golf round"
     assert row["np_power_w"] is None
+
+
+def test_an_outdoor_gravel_ride_keeps_its_power(conn: psycopg.Connection) -> None:
+    """FIT-08 says a Garmin ride ingests the same as a Zwift one. It did not.
+
+    Power analysis was an allowlist of `ride` and `virtualride`, so every other
+    spelling of riding had its power nulled at ingest and could never be quoted.
+    The same shape as the virtualride matching bug, one layer up: the equivalence
+    group knew all six names and the power set knew two.
+    """
+    result = activities.ingest(
+        conn, activity("i4004", kind="GravelRide"), DUBAI, file_bytes=ride_fit()
+    )
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute(
+            "select discipline, avg_power_w, np_power_w from sessions where id = %s",
+            (result.session_id,),
+        )
+        row = cur.fetchone()
+    assert row["discipline"] == "gravelride"
+    assert float(row["avg_power_w"]) == 150.0
+    assert row["np_power_w"] is not None
+
+
+def test_the_power_set_and_the_cycling_group_are_the_same_names() -> None:
+    """Written out twice, they drifted. Now one is built from the other."""
+    assert set(review.equivalents("ride")) == set(activities.POWER_DISCIPLINES)
+    for name in activities.POWER_DISCIPLINES:
+        assert activities.uses_power_analysis(name), name
 
 
 def test_a_non_zwift_activity_takes_the_same_path(conn: psycopg.Connection) -> None:
@@ -374,6 +620,89 @@ def test_a_locally_dropped_file_ingests_without_upstream(
     assert row["external_ref"] is None, "nothing upstream was consulted"
 
 
+def test_a_dropped_file_is_typed_from_its_own_sport(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    """FIT-14 has no platform to ask, but the file says what it is.
+
+    Every watched-folder file used to be called a ride. Almost always right, and
+    wrong in the way that matters: under FIT-07 the difference between a golf
+    round and a ride is the difference between an activity logged and an activity
+    given power figures and scored for compliance.
+    """
+    cases = {
+        "zwift.fit": (("cycling", "virtual_activity"), "virtualride", "VirtualRide"),
+        "outdoor.fit": (("cycling", None), "ride", "Ride"),
+        "parkrun.fit": (("running", None), "run", "Run"),
+        "gym.fit": (("training", "strength_training"), "weighttraining", "WeightTraining"),
+        "golf.fit": (("golf", None), "golf", "Golf"),
+    }
+    for index, (filename, ((sport, sub), discipline, kind)) in enumerate(cases.items()):
+        path = tmp_path / filename
+        path.write_bytes(
+            build_fit(
+                START + timedelta(days=index),
+                power=[100] * 120,
+                heart_rate=[130] * 120,
+                sport=sport,
+                sub_sport=sub,
+            )
+        )
+        session_id = archive.ingest_file(conn, path, DUBAI)
+        conn.commit()
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "select discipline, activity_type, avg_power_w from sessions where id = %s",
+                (session_id,),
+            )
+            row = cur.fetchone()
+        assert row["discipline"] == discipline, filename
+        assert row["activity_type"] == kind, filename
+        # FIT-07 follows from the type, which is the whole point of reading it.
+        expected_power = discipline in ("ride", "virtualride")
+        assert (row["avg_power_w"] is not None) is expected_power, filename
+
+
+def test_a_sport_the_map_does_not_know_is_not_called_a_ride(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    """An unmapped sport fails to match rather than matching everything.
+
+    The same direction `review.equivalents` takes with an unknown discipline, and
+    for the same reason.
+    """
+    path = tmp_path / "tennis.fit"
+    path.write_bytes(build_fit(START, heart_rate=[130] * 120, sport="tennis"))
+    session_id = archive.ingest_file(conn, path, DUBAI)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("select discipline from sessions where id = %s", (session_id,))
+        assert cur.fetchone()["discipline"] == "other"
+
+
+def test_a_file_that_declares_no_sport_keeps_the_documented_default(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    """The one branch that is still a guess, so it stays visible and narrow.
+
+    Every device writes a sport message. 'Other' would be more cautious and would
+    cost a real ride its power analysis, so the fallback is the watched folder's
+    own prior: it is fed by a bike.
+    """
+    path = tmp_path / "silent.fit"
+    path.write_bytes(ride_fit())  # no sport message at all
+    session_id = archive.ingest_file(conn, path, DUBAI)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("select discipline, avg_power_w from sessions where id = %s", (session_id,))
+        row = cur.fetchone()
+    assert row["discipline"] == activities.discipline_of({"type": activities.UNDECLARED_LOCAL_TYPE})
+    assert float(row["avg_power_w"]) == 150.0
+
+
 def test_scanning_the_folder_is_idempotent(conn: psycopg.Connection, tmp_path: Path) -> None:
     (tmp_path / "a.fit").write_bytes(ride_fit())
     (tmp_path / "b.fit").write_bytes(ride_fit(START + timedelta(days=1)))
@@ -411,6 +740,87 @@ def test_the_archive_survives_an_upstream_deletion(
 
     assert archive.restorable(conn), "archive row must outlive the session"
     assert path.exists()
+
+
+def test_a_folder_scan_does_not_rename_a_ride_upstream_already_named(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    """The two ingest paths meet on one row, and the filename must not win.
+
+    A Zwift ride reaches intervals.icu as "Tempus Fugit" and sits on disk as
+    `2026-07-27-181000.fit`. The poll stores it, the watched folder scan finds
+    the identical bytes, FIT-04 matches them on content hash, and the update that
+    follows used to write the stem over the title. The coach then discussed
+    "2026-07-27-181000" with the athlete, which is a lie the suite could not see
+    because both halves worked exactly as written.
+    """
+    body = ride_fit()
+    activities.ingest(conn, activity("i1001"), DUBAI, file_bytes=body)
+    conn.commit()
+
+    path = tmp_path / "2026-07-27-181000.fit"
+    path.write_bytes(body)
+    session_id = archive.ingest_file(conn, path, DUBAI)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("select count(*) as n from sessions")
+        assert cur.fetchone()["n"] == 1, "FIT-04 should have matched, not duplicated"
+        cur.execute("select name from sessions where id = %s", (session_id,))
+        assert cur.fetchone()["name"] == "Tempus Fugit"
+
+
+def test_a_file_with_no_upstream_name_is_still_named_by_its_stem(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    """The stem is a fallback, so it must still name a row that has nothing."""
+    path = tmp_path / "2026-07-27-181000.fit"
+    path.write_bytes(ride_fit())
+    session_id = archive.ingest_file(conn, path, DUBAI)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("select name from sessions where id = %s", (session_id,))
+        assert cur.fetchone()["name"] == "2026-07-27-181000"
+
+
+def test_an_untitled_upstream_activity_does_not_erase_a_name(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    """intervals.icu serves `name: ""` for an activity nobody titled.
+
+    Stored, an empty string is a value, and it would win the coalesce against the
+    name the row already had. So blank is read as absent.
+    """
+    path = tmp_path / "2026-07-27-181000.fit"
+    path.write_bytes(ride_fit())
+    session_id = archive.ingest_file(conn, path, DUBAI)
+    conn.commit()
+
+    activities.ingest(conn, activity("i1001", name="  "), DUBAI, file_bytes=path.read_bytes())
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("select name, external_ref from sessions where id = %s", (session_id,))
+        row = cur.fetchone()
+    assert row["name"] == "2026-07-27-181000"
+    assert row["external_ref"] == "i1001", "the same row, reached from upstream"
+
+
+def test_upstream_renaming_a_ride_still_reaches_the_row(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    """Preferring upstream must not mean freezing the name at first sight."""
+    body = ride_fit()
+    activities.ingest(conn, activity("i1001"), DUBAI, file_bytes=body)
+    conn.commit()
+
+    activities.ingest(conn, activity("i1001", name="Zwift - Race: Stage 3"), DUBAI, file_bytes=body)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("select name from sessions where external_ref = 'i1001'")
+        assert cur.fetchone()["name"] == "Zwift - Race: Stage 3"
 
 
 def test_the_archive_module_contains_no_delete() -> None:
@@ -568,6 +978,43 @@ def test_a_backfilled_session_is_never_reviewed(conn: psycopg.Connection) -> Non
     assert calls == [], "the note writer must not even be called for backfilled history"
 
 
+def test_a_later_ingest_does_not_un_backfill_a_row(conn: psycopg.Connection) -> None:
+    """The flag is how the row came to exist, and no later call corrects that.
+
+    It used to be written on every update, so any live-path ingest touching a
+    backfilled row cleared it — and that flag is the only thing standing between
+    a ride from two years ago and a review with a Telegram message attached. The
+    review path checks `backfilled`, so this is asserted there rather than only
+    on the column.
+    """
+    first = activities.ingest(conn, activity(), DUBAI, file_bytes=ride_fit(), backfilled=True)
+    conn.commit()
+
+    activities.ingest(conn, activity(), DUBAI, file_bytes=ride_fit())  # the live path
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("select backfilled from sessions where id = %s", (first.session_id,))
+        assert cur.fetchone()["backfilled"] is True
+
+    calls: list[int] = []
+    assert review.review(conn, first.session_id, lambda _: calls.append(1) or "note") is None
+    assert calls == [], "history spoke because an update cleared the flag"
+
+
+def test_a_backfill_does_not_mark_a_session_that_arrived_live(conn: psycopg.Connection) -> None:
+    """The other direction. History that already spoke was never silent."""
+    first = activities.ingest(conn, activity(), DUBAI, file_bytes=ride_fit())
+    conn.commit()
+
+    activities.ingest(conn, activity(), DUBAI, file_bytes=ride_fit(), backfilled=True)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("select backfilled from sessions where id = %s", (first.session_id,))
+        assert cur.fetchone()["backfilled"] is False
+
+
 # --- FIT-11 / FIT-13: reconcile and rollups --------------------------------
 
 
@@ -592,7 +1039,15 @@ class FakeIntervals:
 
 
 def test_reconcile_restores_a_deleted_session(conn: psycopg.Connection) -> None:
-    """FIT-11: deleting a session row and running reconcile restores it."""
+    """FIT-11: deleting a session row and running reconcile restores it.
+
+    The archive row is detached first, the same way
+    `test_the_archive_survives_an_upstream_deletion` does it. Now that the poll
+    archives what it downloads, `fit_archive.session_id` references the row, and
+    the foreign key refuses a bare delete — which is FIT-15 working rather than
+    something to route around. Nothing in `src/` deletes a session; this test is
+    simulating one.
+    """
     fake = FakeIntervals([activity()], {"i1001": ride_fit()})
 
     reconcile.run(conn, fake, DUBAI, date(2026, 7, 1))
@@ -602,6 +1057,7 @@ def test_reconcile_restores_a_deleted_session(conn: psycopg.Connection) -> None:
         original = cur.fetchone()["id"]
 
     with conn.transaction(), conn.cursor() as cur:
+        cur.execute("update fit_archive set session_id = null where session_id = %s", (original,))
         cur.execute("delete from sessions where id = %s", (original,))
     conn.commit()
 

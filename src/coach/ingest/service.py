@@ -31,10 +31,10 @@ from zoneinfo import ZoneInfo
 import psycopg
 from psycopg.types.json import Jsonb
 
+from coach import feeds as feedmod
 from coach.ingest import activities as actmod
 from coach.ingest import archive as archivemod
 from coach.ingest import client as clientmod
-from coach.ingest import parse
 from coach.ingest import reconcile as reconcilemod
 from coach.ingest import review as reviewmod
 from coach.ingest import webhook as webhookmod
@@ -105,10 +105,16 @@ def on_activity(
     )
     result = Handled(session_id=ingested.session_id, created=ingested.created)
 
+    # OBS-05: an activity read and stored is the activities feed working, and the
+    # webhook drain never goes through reconcile, which is where the poll stamps
+    # it. Without this the feed reads as never-successful on a deployment that
+    # has a registered app.
+    feedmod.record_success(conn, feedmod.ACTIVITIES)
+
     # FIT-15: the archive keeps the bytes even though upstream has them too,
     # because upstream deleting them is the case the archive exists for.
     if file_bytes and activity_id:
-        _archive(conn, activity_id, file_bytes, ingested.session_id)
+        archivemod.keep_original(conn, activity_id, file_bytes, ingested.session_id)
 
     prescription_id = reviewmod.match(conn, ingested.session_id)
     if prescription_id is not None:
@@ -129,28 +135,6 @@ def on_activity(
         result.deferred = list(outcome.deferred)
 
     return result
-
-
-def _archive(
-    conn: psycopg.Connection, activity_id: str, data: bytes, session_id: int | None
-) -> None:
-    """Keep the downloaded original locally, keyed to the upstream activity."""
-    folder = archive_folder()
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"{activity_id}.fit"
-    if not path.exists():
-        path.write_bytes(data)
-    archivemod.register(conn, path, data)
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(
-            "update fit_archive set session_id = coalesce(session_id, %s), "
-            "external_ref = coalesce(external_ref, %s) where sha256 = %s",
-            (session_id, activity_id, parse.content_hash(data)),
-        )
-
-
-def archive_folder() -> Path:
-    return Path(os.environ.get("COACH_FIT_ARCHIVE", "var/fit-archive"))
 
 
 def watch_folder() -> Path:

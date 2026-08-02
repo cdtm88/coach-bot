@@ -93,6 +93,32 @@ def test_one_ride_through_both_paths_is_one_session(
         assert cur.fetchone()["n"] == 1, "the same ride produced two session rows"
 
 
+def test_the_archived_original_is_a_fit_file_and_not_a_gzip_stream(
+    conn: psycopg.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What the archive writes under `<id>.fit` has to be readable as one.
+
+    intervals.icu serves the original gzipped, and the bytes went to disk as they
+    arrived. FIT-16 reads them back out and posts them to the upload endpoint,
+    where the filename is what says how to read the payload — and `size_bytes`
+    recorded the compressed length beside a hash of the uncompressed content.
+    """
+    monkeypatch.setenv("COACH_FIT_ARCHIVE", str(tmp_path / "archive"))
+    plain = ride_fit()
+
+    archive.keep_original(conn, "i1001", gzipped(plain), session_id=None)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("select path, size_bytes, sha256 from fit_archive")
+        row = cur.fetchone()
+    stored = Path(row["path"]).read_bytes()
+    assert stored == plain, "a gzip stream was written under a .fit name"
+    assert parse.from_fit(stored).avg_power_w == 150.0
+    assert row["size_bytes"] == len(plain), "the recorded size was the compressed one"
+    assert row["sha256"] == parse.content_hash(plain)
+
+
 # --- D3: derived fields are provisional until the platform says otherwise ----
 
 

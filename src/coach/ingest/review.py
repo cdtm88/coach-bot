@@ -19,7 +19,7 @@ from psycopg.types.json import Jsonb
 
 from coach import clock
 from coach.health import recovery as recoverymod
-from coach.ingest.activities import uses_power_analysis
+from coach.ingest.activities import POWER_DISCIPLINES, uses_power_analysis
 from coach.memory import notes as notemod
 
 log = logging.getLogger(__name__)
@@ -118,8 +118,14 @@ def match(conn: psycopg.Connection, session_id: int) -> int | None:
 # what the platform said and should stay that way (FIT-03 keeps the platform's
 # opinion as the platform's), so this widens the comparison instead of
 # rewriting the data.
+#
+# The cycling group is FIT-07's power set rather than a second list of the same
+# names. They were written out twice and drifted: the group had every spelling of
+# riding while power analysis had two, so a gravel ride matched a ride
+# prescription and then had no intensity to compare, because its power was nulled
+# at ingest.
 DISCIPLINE_GROUPS: tuple[tuple[str, ...], ...] = (
-    ("ride", "virtualride", "gravelride", "mountainbikeride", "ebikeride", "cycling"),
+    tuple(sorted(POWER_DISCIPLINES)),
     ("run", "virtualrun", "trailrun"),
     ("gym", "weighttraining", "workout", "strength"),
     ("swim", "openwaterswim"),

@@ -37,6 +37,7 @@ from zoneinfo import ZoneInfo
 import psycopg
 from psycopg.types.json import Jsonb
 
+from coach import feeds as feedmod
 from coach.health import bodymass, recovery
 from coach.ingest import client as clientmod
 
@@ -216,7 +217,7 @@ def sync(
         rows = client.wellness(today - timedelta(days=lookback_days), today)
     except clientmod.IntervalsError as exc:
         result = Synced(errors=[str(exc)])
-        _record_feed(conn, "wellness", ok=False, error=str(exc))
+        feedmod.record_error(conn, feedmod.WELLNESS, str(exc))
         return result
 
     result = store(conn, rows)
@@ -228,21 +229,9 @@ def sync(
 
     bodymass.recompute(conn, today)
     recovery.recompute(conn, today)  # RECOV-04
-    _record_feed(conn, "wellness", ok=True)
+    feedmod.record_success(conn, feedmod.WELLNESS)
     _record_body_mass_feed(conn)
     return result
-
-
-def _record_feed(conn: psycopg.Connection, name: str, ok: bool, error: str | None = None) -> None:
-    """OBS-05: last success per inbound feed, surfaced as staleness by CHAT-09."""
-    with conn.transaction(), conn.cursor() as cur:
-        if ok:
-            cur.execute(
-                "update feeds set last_success_at = now(), last_error = null where name = %s",
-                (name,),
-            )
-        else:
-            cur.execute("update feeds set last_error = %s where name = %s", (error, name))
 
 
 def _record_body_mass_feed(conn: psycopg.Connection) -> None:
