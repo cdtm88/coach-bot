@@ -480,10 +480,15 @@ def main() -> None:
     sweep = _sweep_or_none(zone)
     publish = _publish_or_none(zone)
 
-    # P10's three, each on its own hour. They need a transport rather than a
-    # model: the review is assembled deterministically and the two nudges are
-    # sentences, so nothing here calls Anthropic. That is why an absent Telegram
-    # token costs the messages and not the night — same reasoning as the sweep.
+    # P10's three, each on its own hour. The two nudges are sentences and need
+    # only a transport, so an absent Telegram token costs the messages and not
+    # the night — same reasoning as the sweep.
+    #
+    # The review takes the model as well. It is still assembled deterministically
+    # and still stored that way; the client only voices what the assembly
+    # produced, and `voice.say` falls back to the assembled message on any
+    # failure. So this is a better message when the model is reachable, not a
+    # dependency on it being reachable.
     send = _send_or_none()
 
     jobs: dict[str, Job | Callable[[psycopg.Connection, date], Any]] = {
@@ -502,7 +507,7 @@ def main() -> None:
         jobs["morning"] = Job(run=notifymod.morning_job(send), schedule=morning_schedule())
         jobs["follow_up"] = Job(run=notifymod.follow_up_job(send), schedule=follow_up_schedule())
         jobs["review"] = Job(
-            run=lambda conn, on: reviewmod.run(conn, on, send=send),
+            run=lambda conn, on: reviewmod.run(conn, on, send=send, client=client),
             schedule=review_schedule(),
         )
 

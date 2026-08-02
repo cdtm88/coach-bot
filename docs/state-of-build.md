@@ -178,6 +178,34 @@ so it is the athlete's decision by construction. The ladder's numbers are
 invented and say so; the tests assert the property the PRD actually fixes, which
 is that every step starts below the pre-break week and rises.
 
+**The review had to be split into a record and a message.** The first live
+review posted the assembly verbatim, and it was six labelled sections in a fixed
+order, five of them reporting that nothing had happened. Worse, the weight
+section was `trend.render`, which is the *permission block the prompt carries* —
+so the athlete's weekly summary from his coach contained "You may report this
+figure if asked for it" and "Do not call a plateau or change the programme on
+weight evidence". The system talking to itself in front of him.
+
+They are two artefacts now. `Review.render` is the record: every section, keyed
+by the Sunday, written to the note and the block, because "no intake was logged
+in the week of 2 August" is a fact about that week and something later may need
+it. `Review.message` is what he reads, and it collapses the empty sections into
+one line. `trend.describe` is the athlete-facing twin of `trend.render`, walking
+the same ladder off the same `Claims` so that rewording cannot loosen a gate —
+the existing threshold-drift test caught the first attempt reaching past
+`Claims` to `fit.n`, which is exactly the drift the split risks.
+
+**Voicing puts the model back on the output path, one way only.** `voice.say`
+takes the finished assembly and the persona and asks for it in the coach's own
+words. It may reorder, cut and rephrase; it may not add a number, and `_grounded`
+enforces that rather than requesting it — every figure in the reply has to appear
+in the facts, and a rounding is allowed where an invention is not. It also
+re-asserts REV-03's single question, because one question is a property the
+assembly guarantees and voicing is the only step that could take it away. Any
+failure — no client, no key, a bad reply — posts the assembled message, which is
+a decent message on its own. Improving a working review must not be able to cost
+him the review.
+
 **Two bugs the tests found, both mine.** `store` marked a break's re-entry as
 proposed after the early return for "no active block", so a deployment without
 one would re-propose the same re-entry every Sunday. And `push_upstream` called

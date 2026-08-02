@@ -78,6 +78,14 @@ def p10_jobs(sent: list[str]) -> dict[str, scheduler.Job]:
 def test_the_review_generates_from_the_scheduler_on_a_sunday(
     conn: psycopg.Connection,
 ) -> None:
+    """All six sections, from rollups, in the record the Sunday leaves behind.
+
+    The record rather than the message, and the difference is the point. REV-02
+    is a requirement about what the review *knows*, and the stored note is what
+    anything later reads to find out what was known on a given Sunday. The
+    message is what the athlete reads, and it does not spend a labelled line on
+    each of five sections that have nothing in them.
+    """
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             "insert into rollups (as_of, load_7d, load_28d) values (%s, 420, 1500) "
@@ -88,9 +96,13 @@ def test_the_review_generates_from_the_scheduler_on_a_sunday(
 
     scheduler.run_due(conn, at(SUNDAY, 19), DUBAI, p10_jobs(sent))
 
-    review = next(m for m in sent if "Week ending" in m)
+    with conn.cursor() as cur:
+        cur.execute("select body from notes where kind = 'review'")
+        record = cur.fetchone()["body"]
     for title in weekly.SECTIONS:
-        assert f"{title}:" in review
+        assert f"{title}:" in record
+
+    review = next(m for m in sent if "Week ending" in m)
     assert "420 over the week" in review
 
 

@@ -14,7 +14,7 @@ from decimal import Decimal
 
 # Purposes the router knows about. Kept in step with the check constraint on
 # model_calls.purpose.
-PURPOSES = ("chat", "consolidation", "session_review", "transcription", "recall_test")
+PURPOSES = ("chat", "consolidation", "session_review", "transcription", "recall_test", "review")
 
 # The heavier model. MODEL-03 falls back here, so it is also the safety net when
 # a configured model is unavailable.
@@ -29,6 +29,10 @@ DEFAULTS = {
     "session_review": HEAVY,
     "transcription": HEAVY,
     "recall_test": HEAVY,
+    # The Sunday review is voiced once a week, nobody is waiting on the stream,
+    # and it is the most quotable message the system sends. That combination
+    # buys the heavy model outright.
+    "review": HEAVY,
 }
 
 # USD per million tokens, by model. Used for OBS-01 cost logging and the OBS-07
