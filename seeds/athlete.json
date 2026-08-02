@@ -1,18 +1,28 @@
 {
-  "_source": "docs/seed/coaching-conversation.md, 26 to 27 July 2026",
+  "_source": "coaching-state.md v1.1.0 and data-appendix.md v1.1.0, 2 August 2026",
   "_note": [
-    "Every value here is traceable to that document. Where the transcript gives a",
-    "range, the seed records the midpoint and the reason names the range. Where the",
-    "transcript does not state something, it is absent rather than inferred: there is",
-    "no birth_year, because 'age 37 in July 2026' does not determine one, and no",
-    "availability.weekday_minutes, because he said all seven days but never a duration."
+    "Supersedes the 27 July intake seed. Re-running is safe: a value already current",
+    "is left alone rather than superseded, so this can be applied to a database that",
+    "has the older seed in it and only the changes will be written.",
+    "",
+    "Absent on purpose, not overlooked. There is no birth_year, because 'age 37 in",
+    "August 2026' does not determine one. There are no availability minutes, because",
+    "the plan states a weekly volume ceiling and never a per-day duration. There is no",
+    "body fat figure in facts, because ~40% is Deurenberg-from-BMI and not a",
+    "measurement; it appears in a note where its derivation travels with it.",
+    "",
+    "Things that changed since intake and are worth knowing: the protein target rose",
+    "from 160 to 175 g, the movement restrictions gained side planks, the medical",
+    "flags key is used for the first time, and the block is now seeded rather than",
+    "left to be generated."
   ],
-
   "constraints": [
     {
       "key": "constraint.injury_history",
-      "value": ["L5-S1 herniated disc repair, November 2025. Recovery complete, occasional stiffness. Discharged by physio, cleared for golf and other activity."],
-      "reason": "stated at intake"
+      "value": [
+        "L5-S1 herniated disc repair, November 2025. Recovery complete, occasional stiffness. Discharged by physio, cleared for golf and other activity."
+      ],
+      "reason": "unchanged from intake. The stiffness baseline, the physio course never reaching lower body loading, and the Zwift Ride frame not allowing standing are all in notes rather than here, for the same parsing reason."
     },
     {
       "key": "constraint.movement_restrictions",
@@ -23,10 +33,18 @@
         "no sit-ups or crunches",
         "loaded hip hinge (RDL, single leg RDL, conventional deadlift) withheld pending review around week 8, because the hinge produces the highest lumbar shear of any common gym pattern and technique errors are expensive"
       ],
-      "reason": "set at intake against the L5-S1 repair"
+      "reason": "unchanged from intake. Side planks are NOT here despite having been dropped on 28 July: 'side plank' collides with two trunk patterns in the SAFE-06 vocabulary and excluding either would ban front planks or Pallof presses, both of which are in every session and are what a repaired disc wants. A shoulder that hurts in one movement is an exercise selection decision, not a spinal safety constraint, so it is recorded as an observation instead."
+    },
+    {
+      "key": "constraint.medical_flags",
+      "value": [
+        "Baseline bloods not done: HbA1c, lipids, liver, blood pressure. Outstanding since intake.",
+        "Sleep-disordered breathing conversation not had. Resting respiratory rate 17.1 rpm is at the upper end of normal and sits alongside a BMI of 40.3, which is the combination worth a doctor's opinion.",
+        "Neither blocks training. Both are worth raising when he mentions sleep, fatigue or a GP visit, and neither is worth raising twice."
+      ],
+      "reason": "coaching-state.md sections 1 and 9. Recorded as a safety key so it cannot be superseded by a model."
     }
   ],
-
   "facts": [
     {
       "key": "profile.height_cm",
@@ -46,35 +64,34 @@
       "provenance": "stated",
       "reason": "structured training began 8 July 2026"
     },
-
     {
       "key": "goal.target_weight_kg",
       "value": 100.0,
       "provenance": "stated",
-      "reason": "get back under 100 kg from 129 kg, at 0.6 to 0.8 kg per week, 10 to 14 months"
+      "reason": "under 100 kg from 129 kg, and weight that stays off. 29 kg to lose."
     },
     {
       "key": "goal.event_target",
       "value": "Alpe du Zwift in under 1 hour",
       "provenance": "stated",
-      "reason": "stated at intake. Assessed as a four to six year project that may never happen; the milestones below are the real ladder."
+      "reason": "stated at intake and told directly that it is a four to six year project that may never happen. The milestones are the real ladder; this is kept because it is what he actually wants."
     },
     {
       "key": "goal.milestone_dates",
       "value": [
-        "complete the Alpe within 12 weeks",
+        "complete the Alpe at any time, within 12 weeks",
         "sub 2 hours at around 12 months",
         "sub 90 minutes at around 24 to 30 months",
         "revisit sub 60 only after sub 90"
       ],
       "provenance": "computed",
-      "reason": "modelled from the standard cycling power equation against projected weight and power"
+      "reason": "modelled from the standard cycling power equation. Current projection on measured numbers is 3h38m, down from 4h10m before the ramp test."
     },
     {
       "key": "goal.protein_target_g",
-      "value": 160,
+      "value": 175,
       "provenance": "computed",
-      "reason": "150 to 170 g for satiety, lean mass retention in a deficit and post surgical tissue support. Estimated intake at intake was 95 to 100 g."
+      "reason": "2.3 g per kg of fat-free mass (77 kg), the bottom of the ISSN hypocaloric retention range, and 1.75 g per kg of target weight. Raised from the intake figure of 160. Do not scale to scale weight. Measured intake is around 100 g, so the gap is 75 g and the plan is substitution rather than addition."
     },
     {
       "key": "goal.fitness_preservation",
@@ -82,46 +99,61 @@
       "provenance": "stated",
       "reason": "stated at intake as the point of the whole thing"
     },
-
     {
       "key": "availability.days",
-      "value": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+      "value": [
+        "mon",
+        "tue",
+        "wed",
+        "thu",
+        "fri",
+        "sat",
+        "sun"
+      ],
       "provenance": "stated",
-      "reason": "available every day after work. Six are programmed, one is a genuine rest day."
+      "reason": "available every day after work. Six are programmed and Thursday is a genuine rest day. He offered seven and was refused: eight months post spinal surgery at 129 kg, seven days is how beginners accumulate invisible fatigue."
     },
-
     {
       "key": "equipment.trainer",
-      "value": "Wahoo Kickr Core 2 on a Zwift Ride frame, indoors in Dubai, cooling being built up from one fan",
+      "value": "Wahoo Kickr Core 2 on a Zwift Ride frame, indoors in Dubai. Two fans as of 30 July 2026, plus electrolytes on longer rides. Zwift user id 7967660.",
       "provenance": "stated",
-      "reason": "stated at intake"
+      "reason": "the cooling matters: it was the control in the experiment that separated heat from aerobic base, and the answer was aerobic base"
+    },
+    {
+      "key": "equipment.bikes",
+      "value": [
+        "Zwift Ride frame, fixed with no sway, so he cannot pedal while standing.",
+        "Lake MX239 wide fit gravel shoes and Shimano PD-M540 double sided SPD pedals, fitted 2 August 2026.",
+        "Cleats fully rearward, ball of the foot slightly ahead of the axle, float left free, release tension at its loosest while clipping in is being learned.",
+        "Saddle stock with the nose dropped slightly on 1 August, on trial through week 2. Change nothing else on the saddle until that is read."
+      ],
+      "provenance": "stated",
+      "reason": "wide fit chosen deliberately: the forefoot swells under load and in heat, and lateral compression causes numbness independently of sole pressure"
     },
     {
       "key": "equipment.gym_access",
-      "value": "small apartment building gym, limited equipment. Owns resistance bands and glute bands. A full gym adds a friction step that defeats adherence, so the apartment gym is the deliberate choice until roughly 105 kg.",
+      "value": "Apartment building gym. Dumbbells 2 to 30 kg in 2 kg steps. No barbells, no kettlebells, no suitable step-up platform. Owns resistance bands and glute bands, a kitchen scale, and makes his own protein snacks.",
       "provenance": "stated",
-      "reason": "stated at intake and endorsed: the programme actually done beats the better programme skipped"
+      "reason": "he avoids commercial gyms because the friction kills adherence, and this was endorsed rather than tolerated. Do not push him toward a bigger gym before roughly 105 kg."
     },
-
     {
       "key": "physiology.ftp_watts",
       "value": 115,
       "provenance": "computed",
-      "reason": "ramp test 27 July 2026, 75 percent of MAP 153 W, no discount applied. Supersedes the zFTP of 101 W, which was never a measurement."
+      "reason": "custom ramp test 27 July 2026 at 8 W/min, 75 percent of MAP 153 W, no discount applied. Failure was cadence collapse from aerobic fatigue, which is a genuine ceiling. Supersedes the zFTP of 101 W and the 146 W in the Zwift field, neither of which was a measurement."
     },
     {
       "key": "physiology.threshold_hr",
       "value": 152,
       "provenance": "computed",
-      "reason": "heart rate at 115 W during the ramp test was 149 to 152. Anchored to threshold rather than a guessed maximum."
+      "reason": "heart rate at 115 W during the ramp test. Every zone is anchored to this rather than to a guessed maximum. The easy ride rule is heart rate under 135, target 130, and if power and heart rate disagree heart rate wins."
     },
     {
       "key": "physiology.max_hr",
       "value": 169,
       "provenance": "observed",
-      "reason": "highest observed, 10 July 2026. The ramp test reached 166, so 169 stands. Age predicted 183 was never approached."
+      "reason": "highest observed, 10 July 2026. The ramp test reached 166. Age predicted 183 was never approached. He also has no low end: 40 W to 100 W moves his heart rate about 12 beats, which is why the benchmark pins heart rate rather than power."
     },
-
     {
       "key": "prefs.coach_tone",
       "value": "direct. Challenge rather than validate, evidence only, verdict before reasoning, no em dashes.",
@@ -129,17 +161,61 @@
       "reason": "from the coaching brief given at intake"
     }
   ],
-
+  "body_mass": [
+    {
+      "on": "2026-08-01",
+      "weight_kg": 129.2,
+      "source": "stated",
+      "reason": "morning of Benchmark #1, stated by the athlete rather than synced. The only reading carried over: the trend fits from what arrives next, and seeding a series he did not measure daily would invent a slope."
+    }
+  ],
+  "block": {
+    "title": "Base block 1: aerobic base and first loaded strength",
+    "starts_on": "2026-07-27",
+    "weeks": 4,
+    "content": "## goals\n\nUnder 100 kg and weight that stays off, from 129.2 kg. Complete the Alpe du Zwift within 12 weeks at any time, which the model puts at about 3h38m on current numbers.\n\nThe block's own job is narrower: build an aerobic base that does not exist yet, and put the first load through a lower body that has never had any. Everything else follows those two.\n\n## constraints\n\nSeeded as safety facts and repeated here because the document is what gets read when a session is written. L5-S1 repair November 2025, recovery complete, morning stiffness of 3.5 to 4 out of 5 is his normal. No loaded hip hinge until week 8. No side planks. No barbell work of any kind, and no barbell exists in the gym anyway. Cannot pedal standing.\n\n## physiology\n\nFTP 115 W from the ramp test of 27 July, threshold heart rate 152, observed max 169. Endurance is 64 to 86 W and 123 to 135 bpm. Easy means under 135 bpm, target 130, and heart rate wins any argument with the power number.\n\nBenchmark #1 on 1 August: 84.4 W at 130.3 bpm over 45 minutes, with power falling 19.3 percent from the first third to the last while heart rate held. Whole ride 98.4 percent Z1 and Z2. That is measurement zero and it repeats every four weeks; next around 29 August.\n\n## plan\n\nSix days, one genuine rest day on Thursday. Roughly 3 hours a week on the bike and not above 4 for now.\n\nMonday easy endurance. Tuesday gym A, lower emphasis, physio core work before the strength block because it got sacrificed when it was placed last. Wednesday the quality bike session, sweet spot from week 2. Thursday rest. Friday gym B, upper emphasis. Saturday the long easy ride, or the benchmark every fourth week. Sunday golf or rest, his choice.\n\nProgression rules: two reps in reserve on everything for the first four weeks and no failure, add reps before load, one progression at a time and never gym load and ride volume in the same week, and if stiffness rises after two consecutive sessions regress that one movement for a week.\n\nRoutes for easy rides are flat, Tempus Fugit or Tick Tock. His July variability index averaged 1.14 against a target under 1.05, and the Paris and France routes force surges. Route completion after a workout ends is encouraged at the same heart rate or lower, never higher; the moment ERG releases is the highest risk drift point in a session.\n\n## review\n",
+    "reason": "seeded from coaching-state.md v1.1.0, the block already running since 27 July 2026"
+  },
   "notes": [
+    {
+      "kind": "observation",
+      "occurred_on": "2026-08-02",
+      "body": "Context around the constraints that cannot live in the constraint lists themselves, because SAFE-06 parses those phrase by phrase against the movement vocabulary. Morning stiffness of 3.5 to 4 out of 5 on waking is his normal and clears by mid-morning; a rise above that baseline is the signal, not the absolute number. The physio course ended months ago and was focused entirely on the back, so it never reached lower body loading and the first loaded lower body work of his life was 28 July 2026. Side planks are out of the programme: shoulder pain at bodyweight load in that movement only, with no pain in any other movement including all pressing. Not recorded as a movement restriction, deliberately, because the phrase resolves against two trunk patterns and excluding either would ban front planks or Pallof presses, which are in every session and are precisely what the repaired disc wants. Do not prescribe side planks; do keep the rest of the trunk work. He cannot pedal while standing, because the Zwift Ride frame is fixed and does not sway; standing breaks are stop pedalling, stand 15 to 20 seconds, sit back down, taken in interval recoveries rather than mid-interval and kept identical on benchmark rides."
+    },
     {
       "kind": "block_archive",
       "occurred_on": "2026-07-27",
-      "body": "Baseline block, 8 to 27 July 2026. Thirteen rides, 7.9 hours actual riding, about 3 hours a week. Eighty one percent of that time was tempo or harder, which held under every plausible HRmax assumption from 172 to 190. The cause was a broken anchor rather than poor discipline: Zwift's FTP field read 146 W, which is above his best 5 minute power and physiologically impossible, so Zwift's Zone 2 displayed as 82 to 110 W and he rode it faithfully. Against a real threshold near 115 W that band is tempo. Two independent methods agreed once the FTP was corrected. Ramp test on 27 July set FTP at 115 W, threshold heart rate 152, observed max 169. Heart rate has a very high floor: going from 40 W to 100 W moved it about 12 beats, which is the fastest adapting thing in his physiology and the reason the benchmark ride exists. Cardiac drift of about 8 bpm at matched power is unresolved between aerobic base and Dubai heat, and a second fan plus electrolytes is the experiment that separates them."
+      "body": "Baseline block, 8 to 27 July 2026. Thirteen rides, 7.9 hours actual riding, about 3 hours a week. Eighty one percent of that time was tempo or harder, which held under every plausible HRmax assumption from 172 to 190. The cause was a broken anchor rather than poor discipline: Zwift's FTP field read 146 W, which is above his best 5 minute power and physiologically impossible, so Zwift's Zone 2 displayed as 82 to 110 W and he rode it faithfully. Against a real threshold near 115 W that band is tempo. Ramp test on 27 July set FTP at 115 W, threshold heart rate 152, observed max 169."
     },
     {
       "kind": "observation",
-      "occurred_on": "2026-07-27",
-      "body": "Cycling contributes roughly 5 percent of the deficit, about 984 kcal a week or 140 kcal a day of mechanical work. Diet does the rest. Intake target 2,400 to 2,500 kcal against an estimated maintenance of 3,000, which is an estimate and the scale trend is the measurement. Breakfast is the weakest meal. The weekly takeaway stays, because eliminating enjoyed food predicts relapse."
+      "occurred_on": "2026-08-01",
+      "body": "Benchmark #1, Tempus Fugit, 45 minute free ride block with heart rate pinned at 130, fasted plus coffee, two fans and electrolytes. Average 84.4 W at 130.3 bpm, 0.648 W per bpm, 82 rpm, 0.4 percent coasting. First 15 minutes 95.5 W, middle 80.7 W, last 77.1 W: a 19.3 percent power drop with heart rate flat. Whole ride 98.4 percent Z1 and Z2. Morning weight 129.2 kg, Whoop 69 percent recovery on 9h08 sleep. Do not read the first five minutes at 106.7 W as his sustainable ability; the 77 W at the end is closer to what his aerobic system currently supports. This is measurement zero and repeats every four weeks."
+    },
+    {
+      "kind": "observation",
+      "occurred_on": "2026-08-01",
+      "body": "The heat versus aerobic base question is settled, in favour of aerobic base. July rides drifted about 8 bpm at matched power across three long rides, and the competing explanations were Dubai heat at 129 kg with one fan, or an absent aerobic base. Benchmark #1 ran the full cooling and hydration protocol at a low heart rate, so heat load should have been minimal, and the decoupling was still about 20 percent against under 5 percent for a well trained rider. It is aerobic base. That is the most trainable thing he has and it should move faster than FTP does."
+    },
+    {
+      "kind": "observation",
+      "occurred_on": "2026-08-01",
+      "body": "Cycling will not drive the weight loss and he has been told so. Total mechanical work across the thirteen July rides was 2,530 kJ, about 984 kcal a week or 140 kcal a day. Diet is doing roughly 95 percent of the deficit. Intake target is 2,350 kcal with 175 g protein, 255 g carbohydrate, 70 g fat and 35 g fibre, against an estimated maintenance of 2,750 to 3,050 which cannot be resolved by equations. The adjustment rule is to log at 2,350 for three weeks and read the 7 day rolling average: under 0.4 kg a week drop to 2,150, over 0.8 raise to 2,550, and do not adjust before three weeks. Do not eat back exercise calories. The weekly takeaway stays, because eliminating enjoyed food predicts relapse."
+    },
+    {
+      "kind": "observation",
+      "occurred_on": "2026-08-02",
+      "body": "Body composition is estimated and not measured: roughly 40.6 percent fat and 76.6 kg fat free mass, from Deurenberg on BMI. Every macro figure downstream of that is only as good as the estimate, and a DEXA or a decent bioimpedance reading would tighten all of them. The protein target of 175 g is 2.3 g per kg of that estimated fat free mass. If the estimate moves, the protein target moves with it."
+    },
+    {
+      "kind": "observation",
+      "occurred_on": "2026-08-01",
+      "body": "Week 1 executed, 27 July to 1 August. Monday ramp test, FTP 115 W. Tuesday gym A, the first loaded lower body work of his life; he went close to failure against a two-reps-in-reserve instruction, skipped step ups for want of a platform and side planks for shoulder pain, and reported back 2.5 out of 5 that evening which cleared normally by morning. Wednesday golf. Thursday endurance 60, 64 W at 124 bpm average and 132 max, with zero minutes above 135, the first genuine endurance ride in the dataset. Friday gym B, strain 9.5 against a typical 11.4, RPE 7, loads too light at 8 kg total on the presses. Saturday Benchmark #1. The gym A session at 119 bpm average was cardiovascularly easier than every single July bike ride, which is an independent confirmation of the intensity misallocation arriving from a different direction."
+    },
+    {
+      "kind": "observation",
+      "occurred_on": "2026-08-02",
+      "body": "Open threads as of 2 August. Fourteen consecutive days of logged food including the bad days has not started and is the single biggest open item, because it blocks the nutrition review due around 24 August. Baseline bloods and the sleep-disordered-breathing conversation are both outstanding. Cleat position was set fully rearward on 2 August and is being assessed through week 2. The saddle nose was dropped slightly on 1 August and nothing else on the saddle should change until that trial is read. Gym B working loads are to be found on Friday 7 August, expect 8 to 12 kg a hand. A 20 minute test to cross check FTP is due at week 5, the next ramp test at week 12, Benchmark #2 around 29 August, and the loaded hip hinge is revisited at week 8. Hell of the North was deferred from 8 to 15 August because week 2 already carries first intensity, a 25 percent jump in long ride duration, and new shoes; one progression at a time."
     }
   ]
 }

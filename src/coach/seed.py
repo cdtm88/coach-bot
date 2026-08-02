@@ -27,8 +27,10 @@ from typing import Any
 
 import psycopg
 
+from coach.blocks import document as blockmod
 from coach.config import Config
 from coach.db import connect
+from coach.health import bodymass as bodymassmod
 from coach.memory import facts as factmod
 from coach.memory import notes as notemod
 
@@ -58,7 +60,7 @@ def load(path: Path = DEFAULT_SEED) -> dict[str, Any]:
 
 def apply(conn: psycopg.Connection, data: dict[str, Any]) -> dict[str, int]:
     """Write the seed. Returns counts of what changed."""
-    counts = {"constraints": 0, "facts": 0, "notes": 0, "unchanged": 0}
+    counts = {"constraints": 0, "facts": 0, "body_mass": 0, "block": 0, "notes": 0, "unchanged": 0}
 
     # Safety keys first, so that a prompt assembled at any point during the seed
     # already carries the constraints rather than acquiring them last.
@@ -91,6 +93,39 @@ def apply(conn: psycopg.Connection, data: dict[str, Any]) -> dict[str, int]:
             confidence=Decimal("1.00"),
         )
         counts["facts"] += 1
+
+    # HLTH-05: readings, not facts. Body mass lives in its own table with an
+    # outlier verdict per reading, because the trend is fitted in SQL and a
+    # number in `facts` would be a second, unfittable copy of it.
+    for entry in data.get("body_mass", []):
+        recorded = bodymassmod.record(
+            conn,
+            date.fromisoformat(entry["on"]),
+            entry["weight_kg"],
+            source=entry.get("source", "stated"),
+        )
+        log.info("seeded body mass %s: %s", entry["on"], recorded.status)
+        counts["body_mass"] += 1
+
+    # BLOCK-01. Seeded only when there is no active block: re-running the seed
+    # against a live deployment must not replace a document the coach has been
+    # rewriting for three weeks, and BLOCK-02's version history is exactly the
+    # thing that would be lost.
+    block = data.get("block")
+    if block is not None:
+        if blockmod.active(conn) is None:
+            block_id = blockmod.create(
+                conn,
+                block["title"],
+                date.fromisoformat(block["starts_on"]),
+                block["content"],
+                reason=f"seeded: {block['reason']}",
+                weeks=block.get("weeks", 4),
+            )
+            blockmod.activate(conn, block_id)
+            counts["block"] = 1
+        else:
+            counts["unchanged"] += 1
 
     for entry in data.get("notes", []):
         occurred_on = date.fromisoformat(entry["occurred_on"])

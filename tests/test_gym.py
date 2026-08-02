@@ -25,6 +25,9 @@ DUBAI = ZoneInfo("Asia/Dubai")
 MONDAY = date(2026, 8, 3)
 
 # Verbatim from seeds/athlete.json, set at intake against the L5-S1 repair.
+# The athlete's real words, copied from `seeds/athlete.json` rather than
+# paraphrased. A test below asserts they still match the committed file, so a
+# constraint that changes there fails here rather than silently going untested.
 SEEDED_RESTRICTIONS = [
     "no barbell deadlifts",
     "no heavy barbell back squats",
