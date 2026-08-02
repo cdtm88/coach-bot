@@ -166,11 +166,15 @@ x-coach: &coach
     COACH_LOG_LEVEL: ${COACH_LOG_LEVEL:-INFO}
   secrets: [app_password]
   networks: [db]
+  # `container_name` is per service below, not here: the anchor is shared and
+  # four containers cannot have one name. Worth setting so the Docker page
+  # reads `coach-agent` beside `coach-db` rather than `coach_bot-coach-agent-1`.
 
 services:
 
   migrate:
     <<: *coach
+    container_name: coach-migrate
     restart: "no"
     entrypoint:
       - /bin/sh
@@ -179,6 +183,7 @@ services:
 
   coach-agent:
     <<: *coach
+    container_name: coach-agent
     secrets: [app_password, anthropic_api_key, telegram_bot_token]
     environment:
       <<: *coach-env
@@ -197,6 +202,7 @@ services:
 
   coach-scheduler:
     <<: *coach
+    container_name: coach-scheduler
     secrets: [app_password, anthropic_api_key, intervals_api_key]
     environment:
       <<: *coach-env
@@ -220,6 +226,7 @@ services:
 
   coach-ingest:
     <<: *coach
+    container_name: coach-ingest
     secrets: [app_password, intervals_api_key, macro_ingest_secret]
     environment:
       <<: *coach-env
