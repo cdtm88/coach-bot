@@ -19,13 +19,13 @@ import psycopg
 from coach import clock
 from coach.blocks import document as blockmod
 from coach.calendars import availability as calmod
+from coach.logbook import capture as capturemod
 from coach.memory import facts as factmod
 from coach.memory import notes as notemod
 from coach.memory import state as statemod
 
 # Phase that lands each deferred tool, surfaced in its unavailable result.
 DEFERRED = {
-    "log_session": "P10",
     "get_sessions": "P03",
     "write_session_events": "P08",
 }
@@ -260,6 +260,31 @@ def dispatch(conn: psycopg.Connection, name: str, arguments: dict[str, Any]) -> 
             origin="in_turn",
         )
         return {"queued": True, "pending_write_id": queued}
+
+    if name == "log_session":
+        # LOG-01 to LOG-05. The local record first and the upstream write not at
+        # all from here: LOG-08 forbids the conversation waiting on a network
+        # call, so `push_upstream` is the ingest loop's job rather than the
+        # turn's.
+        try:
+            captured = capturemod.record(
+                conn,
+                arguments["discipline"],
+                date.fromisoformat(arguments["occurred_on"]),
+                arguments.get("detail") or {},
+                clock.configured_tz(),
+            )
+        except capturemod.Incomplete as exc:
+            # LOG-03 and LOG-04: the one question that would make this
+            # recordable, handed back so the coach asks it rather than
+            # inventing a value.
+            return {"recorded": False, "ask": exc.question}
+        return {
+            "recorded": True,
+            "session_id": captured.session_id,
+            "load": float(captured.load),
+            "closed_prescription_id": captured.prescription_id,
+        }
 
     if name == "get_calendar":
         # CALR-05: what the feed published, labelled as such. The tool result
