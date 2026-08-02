@@ -671,3 +671,99 @@ def test_the_calendar_client_only_reads() -> None:
     assert "http.get(" in source
     for verb in (".post(", ".put(", ".patch(", ".delete("):
         assert verb not in source
+
+
+# --- The per-feed row, which was never written -------------------------------
+
+
+def test_a_fetch_records_itself_on_the_feed_row(conn, one_feed) -> None:
+    """`record_fetch` keyed the update on the name and was handed the id.
+
+    A feed's name is what it is *called* — X-WR-CALNAME, or `calendar-N` when the
+    fetch failed and there was no document to read one from. The id is a hash of
+    the URL. They agree essentially never, so `last_fetch_at`, `last_success_at`
+    and `last_error` were blank for every feed forever, while `calendar_fetches`
+    beside them filled up correctly. The live deployment showed exactly that: a
+    feed that had demonstrably failed, with nothing on its row to say so.
+    """
+    feed.sync(conn, DUBAI, TODAY, client=transport(ics()))
+
+    with conn.cursor() as cur:
+        cur.execute("select last_fetch_at, last_success_at, last_error from calendar_feeds")
+        row = cur.fetchone()
+    assert row["last_fetch_at"] is not None, "the fetch left no trace on the feed"
+    assert row["last_success_at"] is not None
+    assert row["last_error"] is None
+
+
+def test_a_failure_lands_on_the_feed_row_and_keeps_the_last_success(conn, one_feed) -> None:
+    """An outage must not erase the fact that the feed once worked."""
+    feed.sync(conn, DUBAI, TODAY, client=transport(ics()))
+    with conn.cursor() as cur:
+        cur.execute("select last_success_at from calendar_feeds")
+        succeeded_at = cur.fetchone()["last_success_at"]
+
+    feed.sync(conn, DUBAI, TODAY, client=transport(None))
+
+    with conn.cursor() as cur:
+        cur.execute("select last_success_at, last_error from calendar_feeds")
+        row = cur.fetchone()
+    assert row["last_error"] is not None, "the failure left no trace on the feed"
+    assert row["last_success_at"] == succeeded_at, "a failure erased the last success"
+    assert "abc123secret" not in row["last_error"]
+
+
+# --- What the error is allowed to say ----------------------------------------
+
+
+def test_a_web_page_says_so_rather_than_naming_an_exception(conn, one_feed) -> None:
+    """The live failure, exactly: a sign-in page served with HTTP 200.
+
+    Google's share menu offers four addresses and only one is the iCal one. The
+    old text — "could not parse (ValueError)" — was true and told the athlete
+    nothing he could act on.
+    """
+    page = b'<!doctype html><html lang="en-US"><head><base href="https://accounts.google.com/">'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=page, headers={"content-type": "text/html"})
+
+    results = feed.sync(
+        conn, DUBAI, TODAY, client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
+
+    assert not results[0].ok
+    assert "text/html" in results[0].error
+    assert ".ics" in results[0].error, "the error should name the address to look for"
+    assert "abc123secret" not in results[0].error
+    assert "accounts.google.com" not in results[0].error, "CALR-06: no URL, not even theirs"
+
+
+# --- webcal:// is what every calendar app hands you ---------------------------
+
+
+def test_a_webcal_url_is_fetched_over_https(monkeypatch: pytest.MonkeyPatch) -> None:
+    """iCloud's "Public Calendar" share gives webcal:// and nothing else.
+
+    httpx refuses the scheme outright, so an Apple calendar produced
+    `UnsupportedProtocol` and no events. It is https with a scheme that tells the
+    OS to subscribe rather than browse.
+    """
+    monkeypatch.setenv(
+        "CALENDAR_ICS_URLS", "webcal://p01-caldav.icloud.com/published/2/abc123secret"
+    )
+    urls = feed.configured_urls()
+    assert urls == ["https://p01-caldav.icloud.com/published/2/abc123secret"]
+
+
+def test_the_scheme_does_not_change_a_feeds_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pasting the same calendar either way must not make it two feeds."""
+    monkeypatch.setenv("CALENDAR_ICS_URLS", "webcal://example.com/cal.ics")
+    as_webcal = feed.feed_id(feed.configured_urls()[0])
+    monkeypatch.setenv("CALENDAR_ICS_URLS", "https://example.com/cal.ics")
+    assert feed.feed_id(feed.configured_urls()[0]) == as_webcal
+
+
+def test_an_ordinary_https_url_is_left_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CALENDAR_ICS_URLS", SECRET_URL)
+    assert feed.configured_urls() == [SECRET_URL]
