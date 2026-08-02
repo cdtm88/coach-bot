@@ -23,7 +23,14 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 COPY README.md ./
 COPY src ./src
-RUN uv sync --frozen --no-dev
+# `--no-editable` is load-bearing, not a preference. Without it `uv sync`
+# installs the project the way it does for development — a finder in
+# site-packages pointing back at /app/src — and the runtime stage below copies
+# the virtualenv without the source tree, so every entry point dies with
+# `ModuleNotFoundError: No module named 'coach'` at container start. Building it
+# into site-packages makes the venv self-contained, which is the only reason
+# copying just the venv works at all.
+RUN uv sync --frozen --no-dev --no-editable
 
 # --- runtime -----------------------------------------------------------------
 
@@ -31,21 +38,29 @@ FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PATH="/app/.venv/bin:$PATH"
+    PATH="/app/.venv/bin:$PATH" \
+    PERSONA_PATH=/app/prompts/persona.md \
+    COACH_MIGRATIONS_DIR=/app/migrations
 
 WORKDIR /app
 
 COPY --from=build /app/.venv /app/.venv
 
-COPY migrations ./migrations
 # Data the installed package looks for on disk rather than importing.
 #
-# `agent/persona.py` and `seed.py` both resolve a default path relative to the
-# source tree, and that does not survive an install into site-packages —
-# `parents[3]` there lands inside the interpreter's lib directory, not the
-# checkout. So both are copied to fixed locations under /app and pointed at
-# explicitly: PERSONA_PATH in the compose file, `coach-seed --file` by hand.
-# Without the copy, `coach-seed` cannot be run as a one-off container at all.
+# `migrate.py`, `agent/persona.py` and `seed.py` all resolve a default path
+# relative to the source tree, and that does not survive an install into
+# site-packages — `parents[2]` there lands inside the interpreter's lib
+# directory, not the checkout. So the files are copied to fixed locations and
+# the two that can be are pointed at by the ENV above; `coach-seed` takes
+# `--file` by hand. Without the copy it cannot be run as a one-off container at
+# all.
+#
+# Migrations are the one that bites hardest, because the failure was silent:
+# an empty glob meant nothing was pending, `coach-migrate` reported "schema up
+# to date" against a completely empty database, and every service then died on
+# its first query. `discover()` now refuses an empty directory outright.
+COPY migrations ./migrations
 COPY prompts ./prompts
 COPY seeds ./seeds
 

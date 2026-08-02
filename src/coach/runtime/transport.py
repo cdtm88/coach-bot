@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from collections.abc import Iterator
 from typing import Any
 
@@ -46,6 +47,49 @@ class NotConfigured(RuntimeError):
     """No bot token. Raised at startup, not at the first message."""
 
 
+# Telegram puts the bot token in the URL path, not in a header. So every httpx
+# INFO line for a poll publishes it — `HTTP Request: POST
+# https://api.telegram.org/bot<token>/getUpdates "HTTP/1.1 200 OK"` — and the
+# care taken below to keep it out of exception messages buys nothing, because
+# the leak is in a log line this module does not write.
+#
+# Same treatment as the calendar feed URLs in `calendars/feed.py`, and the same
+# reasoning: a filter rather than silencing httpx, since the intervals.icu
+# request log is useful and carries no secret (its auth really is in a header).
+_TOKEN_IN_URL = re.compile(r"/bot\d{4,}:[A-Za-z0-9_-]{20,}")
+
+
+class _RedactBotToken(logging.Filter):
+    """SEC-01: strip a bot token out of any record on the HTTP libraries' loggers."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:  # noqa: BLE001 - a broken record must not break logging
+            return True
+        redacted = _TOKEN_IN_URL.sub("/bot<token redacted>", message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = ()
+        return True
+
+
+_REDACTOR = _RedactBotToken()
+
+
+def install_log_redaction() -> None:
+    """Attach the redactor to the libraries that log a request URL.
+
+    Idempotent, and called from :class:`Telegram`'s constructor rather than
+    from an entry point, so there is no way to obtain something that talks to
+    Telegram without it.
+    """
+    for name in ("httpx", "httpcore"):
+        logger = logging.getLogger(name)
+        if _REDACTOR not in logger.filters:
+            logger.addFilter(_REDACTOR)
+
+
 class Telegram:
     """The Telegram HTTP surface: two calls, and the offset between them."""
 
@@ -58,6 +102,7 @@ class Telegram:
         resolved = token if token is not None else os.environ.get("TELEGRAM_BOT_TOKEN")
         if not resolved:
             raise NotConfigured("TELEGRAM_BOT_TOKEN is not set. See docs/setup.md step 4.")
+        install_log_redaction()
         self._url = f"{base}/bot{resolved}"
         # The timeout is the long poll plus headroom; a read timeout equal to the
         # poll timeout would fire on every idle cycle.

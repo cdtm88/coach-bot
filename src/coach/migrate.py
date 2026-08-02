@@ -9,6 +9,7 @@ applied schema.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -21,6 +22,35 @@ log = logging.getLogger(__name__)
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
 
+
+class MigrationsNotFound(RuntimeError):
+    """No migration files where we looked.
+
+    Its own type because the alternative is what actually happened: `glob`
+    returning nothing, no file being pending, and the run reporting `schema up
+    to date` on an empty database. Every process then started and failed one
+    query later with `relation "messages" does not exist`, which points at the
+    schema rather than at the boot step that was supposed to create it.
+    """
+
+
+def migrations_dir() -> Path:
+    """Where the SQL lives, resolved at call time rather than at import.
+
+    `parents[2]` is the repository root only while the package is imported from
+    a checkout. Installed into site-packages — which is how the image ships,
+    and the only way a copied virtualenv can work — it lands in the
+    interpreter's `lib` directory, where there are no migrations and never will
+    be. So the image sets `COACH_MIGRATIONS_DIR`, and this prefers it.
+
+    The same trap has already been paid for twice: `agent/persona.py` and
+    `seed.py` both resolve a default relative to the source tree, and both are
+    given explicit paths in the deployment for exactly this reason.
+    """
+    override = os.environ.get("COACH_MIGRATIONS_DIR")
+    return Path(override) if override else MIGRATIONS_DIR
+
+
 _LEDGER = """
 create table if not exists schema_migrations (
   filename    text primary key,
@@ -29,9 +59,21 @@ create table if not exists schema_migrations (
 """
 
 
-def discover(directory: Path = MIGRATIONS_DIR) -> list[Path]:
-    """Return migration files in filename order, which is numeric by convention."""
-    return sorted(directory.glob("*.sql"))
+def discover(directory: Path | None = None) -> list[Path]:
+    """Return migration files in filename order, which is numeric by convention.
+
+    Empty is an error, not a result. There is no legitimate deployment of this
+    system with nothing to apply.
+    """
+    directory = migrations_dir() if directory is None else directory
+    found = sorted(directory.glob("*.sql"))
+    if not found:
+        raise MigrationsNotFound(
+            f"no migrations in {directory}. Set COACH_MIGRATIONS_DIR to the "
+            "directory holding the numbered .sql files; the image puts them in "
+            "/app/migrations."
+        )
+    return found
 
 
 def applied(conn: psycopg.Connection) -> set[str]:
@@ -41,7 +83,7 @@ def applied(conn: psycopg.Connection) -> set[str]:
         return {row["filename"] for row in cur.fetchall()}
 
 
-def run(conn: psycopg.Connection, directory: Path = MIGRATIONS_DIR) -> list[str]:
+def run(conn: psycopg.Connection, directory: Path | None = None) -> list[str]:
     """Apply every pending migration. Returns the filenames applied."""
     done = applied(conn)
     conn.commit()

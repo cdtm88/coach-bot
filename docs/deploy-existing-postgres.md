@@ -72,6 +72,12 @@ new files. The existing `app_password` needs nothing: it is 0644, which uid 1000
 can already read, and the directory being 0700 is what keeps it private on the
 host.
 
+Address them as `/mnt/cache/...` rather than `/mnt/user/...` if the database
+stack does — on a cache-only share both reach the same files, one through shfs
+and one directly, and using both forms for one dataset across containers is a
+well-known way to get confusing results on Unraid. Matching whatever the existing
+stack uses costs nothing.
+
 Write them with `printf` rather than `echo` out of habit rather than necessity —
 the entrypoints read each one through `$(cat …)`, and command substitution strips
 trailing newlines. `read -rsp` avoids putting a key into shell history at all.
@@ -88,30 +94,62 @@ mounted file.
 | --- | --- |
 | `COACH_TZ` | required; the zone the coach reasons in, an IANA name |
 | `TELEGRAM_CHAT_ID` | required; SEC-03's allowlist, checked on every message |
-| `COACH_FIT_ARCHIVE`, `COACH_FIT_WATCH` | the two host paths below |
+| `COACH_FIT_ARCHIVE`, `COACH_FIT_WATCH` | required; the two host paths below |
 | `INTERVALS_ATHLETE_ID` | optional; `0` resolves to the key owner |
 | `TZ`, `COACH_LOG_LEVEL`, `DAILY_SPEND_CAP_USD` | optional, all defaulted |
 | `CALENDAR_ICS_URLS` | empty until the secret iCal addresses exist |
 
-The two required ones are required in the literal sense — both are `${VAR:?…}`,
+The four required ones are required in the literal sense — each is `${VAR:?…}`,
 so `docker compose up` refuses to start **any** service until they are set, not
-just the one that reads them. That is deliberate for `TELEGRAM_CHAT_ID`: an
-unset allowlist that defaulted to something permissive would be a coach that
-talks to whoever finds the bot.
+just the one that reads them. That is deliberate in each case. An unset allowlist
+defaulting to something permissive would be a coach that talks to whoever finds
+the bot. And a FIT path defaulting to something relative would resolve beside the
+compose file, which is the flash drive — so the archive that must never be pruned
+would be filling up the one volume you least want it on, silently and correctly
+as far as Compose is concerned.
 
 `INTERVALS_WEBHOOK_SECRET` can stay unset. The receiver is built and idle, and
 unset means every webhook payload is refused — the right posture with no
 registered app.
 
+## A separate project, joining the database's network
+
+The coach is its own Compose project and does not `include:` the database's
+compose file. That is the whole shape, and getting it wrong fails immediately:
+`include` merges the other file into *this* project, so this project then tries
+to create the database container too, and Docker refuses because a container of
+that name already exists and belongs to the other project. Two projects cannot
+both own one container.
+
+So the database is referenced, never declared. Its network is attached as
+`external`, which is what puts the coach's containers in the same DNS namespace
+as it:
+
+```bash
+docker inspect <db container> --format \
+  'project={{index .Config.Labels "com.docker.compose.project"}}{{println}}{{range $k,$v := .NetworkSettings.Networks}}net={{$k}} aliases={{$v.Aliases}}{{println}}{{end}}'
+```
+
+The network name goes in the `networks:` block below; the aliases tell you what
+`PGHOST` should be. A Compose service is reachable by its *service* name, which
+is often not the `container_name` — on the Unraid stack, `coach-db` also answers
+to `postgres`, so `PGHOST: postgres` is right.
+
+There is no `depends_on: postgres` for the same reason: `depends_on` cannot cross
+a project boundary. Nothing is lost — the database is already running. What
+changes is that if it is ever stopped, the coach's containers fail on connect and
+restart rather than wait, which is the honest behaviour when there is no longer
+anything local to wait on.
+
 ## The service blocks
 
-Paste into the existing `docker-compose.yml`. `x-coach` factors out what all four
-share; if the file already has anchors, put it beside them.
+Paste into a `docker-compose.yml` of their own. `x-coach` factors out what all
+four share; if the file already has anchors, put it beside them.
 
 ```yaml
 x-coach: &coach
   build:
-    context: ./src/coach-bot          # wherever the checkout lives
+    context: /mnt/cache/appdata/coach-bot/src     # wherever the checkout lives
   user: "10001:10001"
   restart: unless-stopped
   logging:
@@ -122,13 +160,12 @@ x-coach: &coach
     PGPORT: "5432"
     PGUSER: coach
     PGDATABASE: coach
-    PGSSLMODE: disable              # compose network only; no published port
+    PGSSLMODE: disable              # shared network only; no published port
     COACH_TZ: ${COACH_TZ:?set COACH_TZ in .env, an IANA name like Asia/Dubai}
     TZ: ${TZ:-UTC}
     COACH_LOG_LEVEL: ${COACH_LOG_LEVEL:-INFO}
   secrets: [app_password]
-  depends_on:
-    postgres: { condition: service_healthy }
+  networks: [db]
 
 services:
 
@@ -156,8 +193,7 @@ services:
          TELEGRAM_BOT_TOKEN="$$(cat /run/secrets/telegram_bot_token)";
          exec coach-agent'
     depends_on:
-      postgres: { condition: service_healthy }
-      migrate:  { condition: service_completed_successfully }
+      migrate: { condition: service_completed_successfully }
 
   coach-scheduler:
     <<: *coach
@@ -171,7 +207,7 @@ services:
       # MEM-12's markdown fact export, beside the pg_dump the sidecar writes.
       # Retention there is scoped by filename pattern precisely so this can
       # share the directory.
-      - ./backups/postgres:/backups
+      - /mnt/cache/appdata/coach-bot/backups/postgres:/backups
     entrypoint:
       - /bin/sh
       - -c
@@ -180,8 +216,7 @@ services:
          INTERVALS_API_KEY="$$(cat /run/secrets/intervals_api_key)";
          exec coach-scheduler'
     depends_on:
-      postgres: { condition: service_healthy }
-      migrate:  { condition: service_completed_successfully }
+      migrate: { condition: service_completed_successfully }
 
   coach-ingest:
     <<: *coach
@@ -201,8 +236,8 @@ services:
       # FIT-15: the permanent copy of every file the system has seen, never
       # pruned. Put the host path on storage that is backed up — and keep any
       # appdata backup job away from pgdata, which is a different rule entirely.
-      - ${COACH_FIT_ARCHIVE:-./fit-archive}:/var/fit-archive
-      - ${COACH_FIT_WATCH:-./fit-inbox}:/var/fit-inbox
+      - ${COACH_FIT_ARCHIVE:?set COACH_FIT_ARCHIVE in .env}:/var/fit-archive
+      - ${COACH_FIT_WATCH:?set COACH_FIT_WATCH in .env}:/var/fit-inbox
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5).status==200 else 1)\""]
       interval: 60s
@@ -217,18 +252,25 @@ services:
          MACRO_INGEST_SECRET="$$(cat /run/secrets/macro_ingest_secret)";
          exec coach-ingest'
     depends_on:
-      postgres: { condition: service_healthy }
-      migrate:  { condition: service_completed_successfully }
+      migrate: { condition: service_completed_successfully }
 
 # Absolute, because the secrets live on the array and the compose file may not.
 # The names on the left are what the containers see under /run/secrets; only the
 # telegram one differs from its file, which is why it is spelled out.
+# `external` because the database's own project created it. This is what puts
+# the coach in the same DNS namespace as the database without either project
+# owning the other's containers.
+networks:
+  db:
+    external: true
+    name: coach_bot_default
+
 secrets:
-  app_password:        { file: /mnt/user/appdata/coach-bot/secrets/app_password }
-  anthropic_api_key:   { file: /mnt/user/appdata/coach-bot/secrets/anthropic_api_key }
-  telegram_bot_token:  { file: /mnt/user/appdata/coach-bot/secrets/telegram_token }
-  intervals_api_key:   { file: /mnt/user/appdata/coach-bot/secrets/intervals_api_key }
-  macro_ingest_secret: { file: /mnt/user/appdata/coach-bot/secrets/macro_ingest_secret }
+  app_password:        { file: /mnt/cache/appdata/coach-bot/secrets/app_password }
+  anthropic_api_key:   { file: /mnt/cache/appdata/coach-bot/secrets/anthropic_api_key }
+  telegram_bot_token:  { file: /mnt/cache/appdata/coach-bot/secrets/telegram_token }
+  intervals_api_key:   { file: /mnt/cache/appdata/coach-bot/secrets/intervals_api_key }
+  macro_ingest_secret: { file: /mnt/cache/appdata/coach-bot/secrets/macro_ingest_secret }
 ```
 
 ## Two host directories
@@ -238,9 +280,9 @@ beside the compose file, which on Unraid is the flash drive, and the FIT archive
 is the one directory in the system that grows forever and is never pruned.
 
 ```bash
-mkdir -p /mnt/user/appdata/coach-bot/fit-archive /mnt/user/appdata/coach-bot/fit-inbox
-chown -R 10001:10001 /mnt/user/appdata/coach-bot/fit-archive /mnt/user/appdata/coach-bot/fit-inbox
-chmod 750 /mnt/user/appdata/coach-bot/fit-archive /mnt/user/appdata/coach-bot/fit-inbox
+mkdir -p /mnt/cache/appdata/coach-bot/fit-archive /mnt/cache/appdata/coach-bot/fit-inbox
+chown -R 10001:10001 /mnt/cache/appdata/coach-bot/fit-archive /mnt/cache/appdata/coach-bot/fit-inbox
+chmod 750 /mnt/cache/appdata/coach-bot/fit-archive /mnt/cache/appdata/coach-bot/fit-inbox
 ```
 
 Then point `COACH_FIT_ARCHIVE` and `COACH_FIT_WATCH` in `.env` at them. `ls -ldn`
