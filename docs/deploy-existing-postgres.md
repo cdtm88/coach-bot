@@ -37,12 +37,19 @@ stop activity ingest.
 | `migrate` | `python -m coach.migrate`, runs once, exits 0 |
 | `coach-agent` | Telegram long poll; one reply per backlog |
 | `coach-ingest` | two HTTP routes and six polling loops |
-| `coach-scheduler` | the nightly jobs at 03:00 local |
+| `coach-scheduler` | the nightly jobs at 03:00, and P10's three timed messages |
 
 Only `coach-agent` and `coach-scheduler` need the Anthropic key. Only
-`coach-ingest` needs the intervals.icu key, the macro secret and the calendar
-URLs. Each gets what it reads and nothing else, so one leaked environment is not
-three.
+`coach-ingest` needs the macro secret and the calendar URLs. Each gets what it
+reads and nothing else, so one leaked environment is not three.
+
+**`coach-scheduler` holds the most, and that changed with P10.** It used to need
+no Telegram credentials at all; now it sends the morning message, the evening
+follow-up and the Sunday review, so it carries the bot token and the allowlisted
+chat id alongside the Anthropic and intervals.icu keys. Worth stating because it
+is the one service whose secret list grew, and a stack deployed before P10 will
+log `P10 notifications not scheduled: TELEGRAM_ALLOWED_CHAT_ID is not set` and
+carry on doing everything else — which is the intended failure, and easy to miss.
 
 ## Secrets
 
@@ -93,6 +100,7 @@ mounted file.
 | | |
 | --- | --- |
 | `COACH_TZ` | required; the zone the coach reasons in, an IANA name |
+| `COACH_MORNING_HOUR` etc. | optional; NOTIF-05's four hours, defaulted below |
 | `TELEGRAM_CHAT_ID` | required; SEC-03's allowlist, checked on every message |
 | `COACH_FIT_ARCHIVE`, `COACH_FIT_WATCH` | required; the two host paths below |
 | `INTERVALS_ATHLETE_ID` | optional; `0` resolves to the key owner |
@@ -107,6 +115,23 @@ the bot. And a FIT path defaulting to something relative would resolve beside th
 compose file, which is the flash drive — so the archive that must never be pruned
 would be filling up the one volume you least want it on, silently and correctly
 as far as Compose is concerned.
+
+P10 adds four optional hours, all in `COACH_TZ` rather than UTC. Omit them and
+the coach uses these:
+
+```
+COACH_MORNING_HOUR=6        # NOTIF-01, names today's session or the rest day
+COACH_FOLLOW_UP_HOUR=21     # NOTIF-02, one check when a session left no trace
+COACH_REVIEW_HOUR=18        # REV-01
+COACH_REVIEW_WEEKDAY=6      # Monday is 0, Sunday is 6
+```
+
+An unparseable or out-of-range value logs and falls back rather than raising: a
+typo should cost a message at the wrong time, not the 03:00 consolidation pass.
+
+`PUBLIC_BASE_URL` starts mattering here too — NOTIF-04 serves charts at
+`/charts/load` and `/charts/weight`, and that is what makes the link the coach
+sends resolvable from a phone rather than only from inside the network.
 
 `INTERVALS_WEBHOOK_SECRET` can stay unset. The receiver is built and idle, and
 unset means every webhook payload is refused — the right posture with no
@@ -203,12 +228,18 @@ services:
   coach-scheduler:
     <<: *coach
     container_name: coach-scheduler
-    secrets: [app_password, anthropic_api_key, intervals_api_key]
+    # Four secrets, which is more than any other service holds. P10 is why: the
+    # scheduler sends the morning message, the evening follow-up and the Sunday
+    # review, so it needs the same Telegram credentials the agent does. The
+    # alternative — routing its messages through the agent — would mean a queue
+    # between two containers for three messages a day.
+    secrets: [app_password, anthropic_api_key, intervals_api_key, telegram_bot_token]
     environment:
       <<: *coach-env
       DAILY_SPEND_CAP_USD: ${DAILY_SPEND_CAP_USD:-3.00}
       COACH_EXPORT_DIR: /backups
       INTERVALS_ATHLETE_ID: ${INTERVALS_ATHLETE_ID:-0}
+      TELEGRAM_ALLOWED_CHAT_ID: ${TELEGRAM_CHAT_ID:?set TELEGRAM_CHAT_ID in .env}
     volumes:
       # MEM-12's markdown fact export, beside the pg_dump the sidecar writes.
       # Retention there is scoped by filename pattern precisely so this can
@@ -219,7 +250,8 @@ services:
       - -c
       - 'export PGPASSWORD="$$(cat /run/secrets/app_password)"
          ANTHROPIC_API_KEY="$$(cat /run/secrets/anthropic_api_key)"
-         INTERVALS_API_KEY="$$(cat /run/secrets/intervals_api_key)";
+         INTERVALS_API_KEY="$$(cat /run/secrets/intervals_api_key)"
+         TELEGRAM_BOT_TOKEN="$$(cat /run/secrets/telegram_bot_token)";
          exec coach-scheduler'
     depends_on:
       migrate: { condition: service_completed_successfully }

@@ -97,8 +97,9 @@ services:
       - ./prompts:/app/prompts:ro
     # No ports. It reaches Telegram outbound; nothing reaches it.
 
-  # The nightly work, on the athlete's local 03:00: consolidation, then decay,
-  # then the fact export.
+  # The nightly work on the athlete's local 03:00 — consolidation, the sweep,
+  # decay, the fact export — and P10's three timed messages, which are the
+  # reason this service holds Telegram credentials.
   scheduler:
     <<: *app
     command: ["coach-scheduler"]
@@ -108,6 +109,17 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY in .env}
       DAILY_SPEND_CAP_USD: ${DAILY_SPEND_CAP_USD:-3.00}
       COACH_EXPORT_DIR: /backups
+      # PLAN-05's sweep needs the calendar. Absent, the sweep is skipped with a
+      # warning and the rest of the night still runs.
+      INTERVALS_API_KEY: ${INTERVALS_API_KEY:?set INTERVALS_API_KEY in .env}
+      INTERVALS_ATHLETE_ID: ${INTERVALS_ATHLETE_ID:-0}
+      # P10: this process now speaks. The morning message, the evening
+      # follow-up and the Sunday review are all sent from here, so it needs the
+      # same Telegram credentials the agent has. Without them it logs
+      # "P10 notifications not scheduled" and does everything else — which is
+      # the intended failure, and quiet enough to miss for a week.
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?set TELEGRAM_BOT_TOKEN in .env}
+      TELEGRAM_ALLOWED_CHAT_ID: ${TELEGRAM_ALLOWED_CHAT_ID:?set TELEGRAM_ALLOWED_CHAT_ID in .env}
     volumes:
       # MEM-12's markdown export lands beside the pg_dump, in the same folder
       # postgres mounts. Read-write: this service is the one that writes it.
