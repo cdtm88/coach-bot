@@ -223,6 +223,14 @@ def review(
     if session["backfilled"]:
         log.debug("session %s is backfilled; no review (FIT-09)", session_id)
         return None
+    if session["data_unavailable"]:
+        # There is nothing to review. The row records that the athlete did
+        # something upstream will not describe, and a note written off it would
+        # be the model filling in a session it has never seen — which is the one
+        # thing FIT-06's forward looking note must not be. The coach raises it as
+        # a question instead; see `prompt.render_unreadable`.
+        log.debug("session %s carries no data; no review", session_id)
+        return None
     if session["reviewed_at"] is not None:
         return None
 
@@ -293,16 +301,29 @@ def missed(conn: psycopg.Connection, now: datetime, tz: ZoneInfo) -> list[dict[s
         day = clock.local_day(candidate["planned_for"], tz)
         with conn.cursor() as cur:
             cur.execute(
-                "select count(*) as n from sessions where local_date = %s",
+                "select count(*) as n, "
+                "       count(*) filter (where data_unavailable) as unreadable "
+                "  from sessions where local_date = %s",
                 (day,),
             )
-            same_day = cur.fetchone()["n"]
+            counted = cur.fetchone()
+            same_day, unreadable = counted["n"], counted["unreadable"]
 
         # RECOV-06: check the load signal before drawing a conclusion, not after.
         load_recorded = recoverymod.load_recorded_on(conn, day)
         deviation = recoverymod.for_day(conn, day)
 
-        if same_day:
+        if same_day and unreadable == same_day:
+            # Every session on the day is one upstream will not describe — a gym
+            # or golf session Whoop wrote to Strava, most likely. Not missed, and
+            # not matched either: nothing here can say whether it was the
+            # prescribed work. The coach asks; see `prompt.render_unreadable`.
+            is_missed = False
+            reason = (
+                f"{unreadable} activity(s) on the day the platform will not serve; "
+                "ask rather than conclude"
+            )
+        elif same_day:
             is_missed = False
             reason = f"{same_day} session(s) on the day; unmatched rather than missed"
         elif load_recorded:
@@ -325,6 +346,7 @@ def missed(conn: psycopg.Connection, now: datetime, tz: ZoneInfo) -> list[dict[s
                 # What was known when the verdict was reached. ADJ-08 reads this.
                 "signals": {
                     "sessions_on_day": same_day,
+                    "unreadable_on_day": unreadable,
                     "load_recorded": load_recorded,
                     "recovery_deviation": (
                         float(deviation.deviation)
