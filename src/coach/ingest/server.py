@@ -50,6 +50,7 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 
+from coach import clock
 from coach.calendars import availability as calavailmod
 from coach.calendars import feed as calfeedmod
 from coach.health import macros as macromod
@@ -58,6 +59,7 @@ from coach.ingest import client as clientmod
 from coach.ingest import reconcile as reconcilemod
 from coach.ingest import service
 from coach.ingest import webhook as webhookmod
+from coach.notify import charts as chartmod
 from coach.plans import sync as plansyncmod
 
 log = logging.getLogger(__name__)
@@ -227,10 +229,37 @@ def make_handler(
                 },
             )
 
+        def _reply_html(self, code: int, body: str) -> None:
+            payload = body.encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
         def do_GET(self) -> None:  # noqa: N802 - the stdlib's naming, not ours
-            if self.path.rstrip("/") == "/health":
+            path = self.path.split("?", 1)[0].rstrip("/")
+            if path == "/health":
                 self._reply(200, {"ok": True})
                 return
+
+            # NOTIF-04: charts are pages, not chat embeds. Unauthenticated on
+            # purpose — the page shows load figures and a trend slope with no
+            # name and no identifiers, and a link the athlete has to authenticate
+            # to open is a link they will not open from a phone.
+            if path.startswith("/charts/"):
+                kind = path.rsplit("/", 1)[-1]
+                today = clock.local_day(datetime.now(UTC), zone)
+                try:
+                    with connect() as conn:
+                        code, body = chartmod.page(conn, kind, today)
+                except Exception:
+                    log.exception("chart %s failed", kind)
+                    self._reply_html(500, "<!doctype html><p>Could not draw that.")
+                    return
+                self._reply_html(code, body)
+                return
+
             self._reply(404, {"error": "no such route"})
 
     return Handler

@@ -318,6 +318,30 @@ def _sweep_or_none(tz: Any) -> Callable[[psycopg.Connection, date], Any] | None:
         return None
 
 
+def _send_or_none() -> Callable[[str], None] | None:
+    """A one-argument sender bound to the allowlisted chat, or nothing.
+
+    Constructed here for the same reason the sweep's client is: this process
+    should still consolidate when the Telegram token is missing. A scheduler
+    that refused to start because it could not send a good-morning message would
+    take the nightly memory pass down with it.
+    """
+    try:
+        from coach.runtime import transport
+        from coach.telegram import bot as botmod
+
+        allowlist = botmod.Allowlist()
+        telegram = transport.Telegram()
+    except Exception as exc:  # noqa: BLE001 - the night matters more than the message
+        log.warning("P10 notifications not scheduled: %s", exc)
+        return None
+
+    def send(text: str) -> None:
+        telegram.send(allowlist.chat_id, text)
+
+    return send
+
+
 def consolidation_job(
     propose: Callable[..., Any], tz: Any = None
 ) -> Callable[[psycopg.Connection, date], Any]:
@@ -415,12 +439,28 @@ def main() -> None:
     # wrong should stop the sweep, not the two jobs that need no network.
     sweep = _sweep_or_none(zone)
 
-    jobs: dict[str, Callable[[psycopg.Connection, date], Any]] = {
+    # P10's three, each on its own hour. They need a transport rather than a
+    # model: the review is assembled deterministically and the two nudges are
+    # sentences, so nothing here calls Anthropic. That is why an absent Telegram
+    # token costs the messages and not the night — same reasoning as the sweep.
+    send = _send_or_none()
+
+    jobs: dict[str, Job | Callable[[psycopg.Connection, date], Any]] = {
         "consolidation": consolidate,
         **({"sweep": sweep} if sweep else {}),
         "decay": decay_job,
         "export": export_job,
     }
+    if send is not None:
+        from coach.notify import daily as notifymod
+        from coach.review import weekly as reviewmod
+
+        jobs["morning"] = Job(run=notifymod.morning_job(send), schedule=morning_schedule())
+        jobs["follow_up"] = Job(run=notifymod.follow_up_job(send), schedule=follow_up_schedule())
+        jobs["review"] = Job(
+            run=lambda conn, on: reviewmod.run(conn, on, send=send),
+            schedule=review_schedule(),
+        )
 
     serve(stop, jobs, tz=zone)
     log.info("scheduler stopped")

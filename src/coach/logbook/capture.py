@@ -214,7 +214,7 @@ def push_upstream(conn: psycopg.Connection, api: Any, captured: Captured) -> Cap
         "icu_training_load": float(captured.load),
     }
     try:
-        created = api.create_manual_activity(payload)
+        created = api.create_manual(payload)
     except Exception as exc:  # noqa: BLE001 - LOG-08: never affects the local record
         log.warning("could not write session %s upstream: %s", captured.session_id, exc)
         return replace(captured, upstream_error=str(exc))

@@ -32,7 +32,7 @@ class FakeIntervals:
         self.posted: list[dict[str, Any]] = []
         self.fail = fail
 
-    def create_manual_activity(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def create_manual(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self.fail:
             raise RuntimeError("upstream is down")
         self.posted.append(payload)
@@ -267,3 +267,17 @@ def test_the_tool_hands_back_the_question_rather_than_guessing(
 
     assert result["recorded"] is False
     assert "cart" in result["ask"]
+
+
+def test_the_fake_matches_the_real_client_surface() -> None:
+    """The method name is the whole integration, and a fake cannot check itself.
+
+    `push_upstream` calls one method on an object it is handed. A fake that
+    answers to a name the real client does not have passes every test in this
+    file and fails on the first real session — which is exactly what happened
+    while this was being written.
+    """
+    from coach.ingest import client as clientmod
+
+    assert hasattr(clientmod.Intervals, "create_manual")
+    assert hasattr(FakeIntervals, "create_manual")
