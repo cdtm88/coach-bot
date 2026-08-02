@@ -52,6 +52,29 @@ def daily_spend_cap() -> Decimal:
     return cap
 
 
+def _database_url() -> str | None:
+    """Where the database is, or None to let libpq answer that itself.
+
+    `DATABASE_URL` when it is set. Otherwise `PGHOST` being present is taken as
+    the deployment saying "the libpq variables are configured, use them" — which
+    is the convention a Postgres deployed independently of this repository is
+    likely to already have, with the password in a mounted file exported as
+    `PGPASSWORD` rather than interpolated into a URI.
+
+    Only when neither is present is this a missing configuration, and then it
+    says so naming both routes rather than only the one it happened to check.
+    """
+    url = os.environ.get("DATABASE_URL")
+    if url:
+        return url
+    if os.environ.get("PGHOST"):
+        return None
+    raise ConfigError(
+        "no database configured. Set DATABASE_URL, or the libpq variables "
+        "PGHOST/PGUSER/PGDATABASE with PGPASSWORD. See docs/deploy.md."
+    )
+
+
 def _require(name: str) -> str:
     value = os.environ.get(name)
     if not value:
@@ -61,7 +84,10 @@ def _require(name: str) -> str:
 
 @dataclass(frozen=True)
 class Config:
-    database_url: str
+    # None means "libpq will work it out from PGHOST and friends", which is a
+    # real configuration and not a missing one. `coach.db.connect` treats it that
+    # way and raises only when neither route is available.
+    database_url: str | None
     timezone: ZoneInfo
     daily_spend_cap_usd: Decimal
 
@@ -76,7 +102,7 @@ class Config:
             raise ConfigError(f"TZ={tz_name!r} is not a known timezone") from exc
 
         return cls(
-            database_url=_require("DATABASE_URL"),
+            database_url=_database_url(),
             timezone=tz,
             # OBS-07: the daily hard stop. Configurable without a code change.
             daily_spend_cap_usd=daily_spend_cap(),
