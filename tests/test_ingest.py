@@ -715,3 +715,48 @@ def test_a_silent_day_past_the_window_is_missed(conn: psycopg.Connection) -> Non
     with conn.cursor() as cur:
         cur.execute("select status from prescriptions where id = %s", (prescription_id,))
         assert cur.fetchone()["status"] == "missed"
+
+
+# --- PLAN-07: the word the platform uses is not the word the coach uses ------
+
+
+def test_a_zwift_ride_closes_a_ride_prescription(conn: psycopg.Connection) -> None:
+    """Found live: seventeen ingested rides, all `virtualride`, none matching.
+
+    Every indoor ride comes back from intervals.icu as `virtualride` because
+    they are all Zwift. Prescriptions say `ride`. An exact comparison means the
+    two never meet, so no session closes its prescription and adherence reads
+    zero however faithfully the athlete trained — with nothing erroring.
+    """
+    from psycopg.types.json import Jsonb
+
+    import conftest
+    from coach.ingest import review as reviewmod
+
+    on = date(2026, 7, 30)
+    block_id = conftest.ensure_block(conn)
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "insert into prescriptions (block_id, planned_for, discipline, spec, status) "
+            "values (%s, %s, 'ride', %s, 'planned') returning id",
+            (block_id, datetime(2026, 7, 30, 18, tzinfo=UTC), Jsonb({"duration_s": 3600})),
+        )
+        prescription_id = int(cur.fetchone()["id"])
+        cur.execute(
+            "insert into sessions (discipline, started_at, local_date, source, duration_s) "
+            "values ('virtualride', %s, %s, 'intervals', 3600) returning id",
+            (datetime(2026, 7, 30, 17, tzinfo=UTC), on),
+        )
+        session_id = int(cur.fetchone()["id"])
+
+    assert reviewmod.match(conn, session_id) == prescription_id
+
+
+def test_an_unknown_discipline_matches_only_itself(conn: psycopg.Connection) -> None:
+    """The safe direction: a word in no group must not match everything."""
+    from coach.ingest import review as reviewmod
+
+    assert reviewmod.equivalents("kitesurfing") == ["kitesurfing"]
+    assert "virtualride" in reviewmod.equivalents("ride")
+    assert "ride" in reviewmod.equivalents("virtualride")
+    assert "weighttraining" in reviewmod.equivalents("gym")
