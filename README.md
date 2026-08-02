@@ -152,6 +152,14 @@ src/coach/
     authority.py   the bounds: reduce only, this week, once (ADJ-02/04/05/08)
     apply.py       the change, the record, and the 12h notice (ADJ-06/07)
     pass_.py       the entry point ingest calls
+  review/          P10: the Sunday review
+    weekly.py      the sections, assembled in SQL; the record and the message
+    voice.py       the record said in the coach's voice, and the numbers guard
+  notify/          P10: the two messages a day the coach sends unasked
+    daily.py       what today is (NOTIF-01); one follow-up, never a chase (NOTIF-02)
+    charts.py      the images that go with them
+  logbook/         P10: a gym session closed from chat alone (LOG-*)
+    capture.py     what was lifted, into a session that counts toward load
   runtime/         the wiring: what makes the phases into running processes
     models.py      the only place an Anthropic client is built, and the spend guard
     transport.py   the only place that talks to Telegram
@@ -171,7 +179,7 @@ matters.
 ```bash
 uv sync --extra dev
 ./scripts/dev-db.sh start      # prints TEST_DATABASE_URL; export it
-uv run pytest -q               # 499 passing
+uv run pytest -q               # 802 passing
 ./scripts/dev-db.sh stop
 ```
 

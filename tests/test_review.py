@@ -125,7 +125,7 @@ def test_load_is_read_from_the_rollup_and_compared_with_last_week(
     assert "440 over the week" in body
     assert "up 10%" in body
     assert "1600 over 28 days" in body
-    assert "2 gym session(s)" in body
+    assert "2 gym sessions" in body
 
 
 def test_a_rest_sunday_still_reports_the_week(conn: psycopg.Connection) -> None:

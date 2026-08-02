@@ -370,6 +370,79 @@ def _direction_line(trend: Fit, claims: Claims) -> str:
     )
 
 
+def _direction_phrase(trend: Fit, claims: Claims) -> str:
+    """`_direction_line`'s twin, as a statement rather than a permission.
+
+    The same ladder, rung for rung, and it has to stay that way: two renderers
+    off one fit are only safe while neither can say something the other would
+    have forbidden. The straddles-zero case is the one that matters — the point
+    estimate has a sign there and quoting it would be the exact failure HLTH-08
+    exists to prevent.
+    """
+    slope = trend.slope_kg_per_week
+    assert slope is not None  # the caller checks
+
+    if abs(slope) < FLAT_KG_PER_WEEK:
+        return "It is holding steady."
+
+    direction = "falling" if slope < 0 else "rising"
+
+    if not claims.may_quote_rate or trend.rate_low is None or trend.rate_high is None:
+        return f"The trend is {direction}, though it is too early to put a rate on it."
+
+    low, high = sorted((trend.rate_low, trend.rate_high))
+    if low <= 0 <= high:
+        return "Which way it is going is not clear yet."
+
+    magnitude = sorted((abs(low), abs(high)))
+    return (
+        f"The trend is {direction}, between {magnitude[0]:.2f} and {magnitude[1]:.2f} kg per week."
+    )
+
+
+def describe(trend: Fit, claims: Claims) -> str:
+    """The same claim ladder, written for the athlete rather than the model.
+
+    `render` below is a list of permissions addressed to the coach, and the
+    weekly review used to post it verbatim. The athlete read "You may report
+    this figure if asked for it" and "Do not call a plateau" in his own weekly
+    summary, which is the system talking to itself in front of him.
+
+    Splitting the two is the fix, and the risk it introduces is that they drift:
+    a claim gate that loosens in one renderer and not the other. Both are driven
+    off the same `Claims`, and nothing here reaches past it to the fit.
+    """
+    if trend.n == 0:
+        # HLTH-15 again, from the other side. Silence about weight reads as a
+        # stable weight to the athlete just as it does to the model, so the
+        # review says the feed is empty rather than omitting the section.
+        return "no readings have come through, so there is no trend to read yet."
+
+    # `reading(s)` and an ISO date are how the record writes itself. Neither
+    # belongs in a sentence addressed to a person.
+    readings = f"{trend.n} reading{'' if trend.n == 1 else 's'}"
+    days = f"{trend.span_days} day{'' if trend.span_days == 1 else 's'}"
+
+    parts: list[str] = []
+    if claims.may_report_reading and trend.latest_kg is not None and trend.last_on is not None:
+        parts.append(f"{trend.latest_kg:.1f} kg on {trend.last_on.day} {trend.last_on:%B}")
+    parts.append(f"{readings} over {days}")
+    body = ", from ".join(parts) if len(parts) > 1 else parts[0]
+
+    lines = [f"{body}."]
+    if claims.may_state_direction and trend.slope_kg_per_week is not None:
+        lines.append(_direction_phrase(trend, claims))
+    else:
+        lines.append("Not enough readings yet to say which way it is going.")
+
+    if claims.weekday_bias:
+        lines.append(
+            "Every reading has landed on the same weekday, so it is noisier than it looks."
+        )
+
+    return " ".join(lines)
+
+
 def render(trend: Fit, claims: Claims) -> str:
     """The body mass block for the prompt.
 
@@ -377,6 +450,9 @@ def render(trend: Fit, claims: Claims) -> str:
     failure mode is a model that has a number and reaches for it. HLTH-09 is
     stated positively here — the readings themselves are not in the context at
     all, so there is nothing to compare.
+
+    Never send this to the athlete. `describe` above is the same information
+    addressed to him.
     """
     if trend.n == 0:
         # Present rather than omitted, and it says do not raise it rather than
