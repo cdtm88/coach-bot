@@ -1345,3 +1345,135 @@ def test_an_activity_that_becomes_readable_clears_the_flag(conn: psycopg.Connect
     assert row["data_unavailable"] is False
     assert row["discipline"] == "ride"
     assert row["name"] == "Tempus Fugit"
+
+
+# --- FIT-15: the watched folder gets a copy, not a pointer -------------------
+
+
+def test_a_dropped_file_is_copied_into_the_archive(
+    conn: psycopg.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The archive recorded the inbox path and kept no copy of its own.
+
+    Which makes the "permanent archive that is never pruned" a row pointing at a
+    directory the athlete owns and tidies. FIT-15 exists because data can be
+    taken away; a pointer survives nothing.
+    """
+    archive_dir = tmp_path / "archive"
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    monkeypatch.setenv("COACH_FIT_ARCHIVE", str(archive_dir))
+    dropped = inbox / "zwift.fit"
+    dropped.write_bytes(ride_fit())
+
+    archive.ingest_file(conn, dropped, DUBAI)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("select path from fit_archive")
+        stored = Path(cur.fetchone()["path"])
+    assert stored.parent == archive_dir, f"the archive still points at {stored.parent}"
+    assert stored.read_bytes() == ride_fit()
+
+
+def test_the_archive_outlives_the_inbox(
+    conn: psycopg.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tidying the drop folder must not empty the archive. FIT-16 reads it back."""
+    monkeypatch.setenv("COACH_FIT_ARCHIVE", str(tmp_path / "archive"))
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    dropped = inbox / "zwift.fit"
+    dropped.write_bytes(ride_fit())
+
+    archive.ingest_file(conn, dropped, DUBAI)
+    conn.commit()
+    dropped.unlink()  # the athlete clears the folder
+
+    row = archive.restorable(conn)[0]
+    assert Path(row["path"]).exists(), "the archive lost the file with the inbox"
+    assert parse.from_fit(Path(row["path"]).read_bytes()).avg_power_w == 150.0
+
+
+def test_two_files_sharing_a_name_are_both_archived(
+    conn: psycopg.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`register` inserts `on conflict (path) do nothing`.
+
+    A sync tool that reuses one filename for successive activities — which is
+    what a mounted device does — silently left every file after the first
+    unarchived, with no row and no error.
+    """
+    monkeypatch.setenv("COACH_FIT_ARCHIVE", str(tmp_path / "archive"))
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    reused = inbox / "activity.fit"
+
+    reused.write_bytes(ride_fit())
+    archive.ingest_file(conn, reused, DUBAI)
+    conn.commit()
+
+    reused.write_bytes(ride_fit(START + timedelta(days=1)))  # same name, new ride
+    archive.ingest_file(conn, reused, DUBAI)
+    conn.commit()
+
+    rows = archive.restorable(conn)
+    assert len(rows) == 2, "the second activity was never archived"
+    assert len({r["sha256"] for r in rows}) == 2
+    for row in rows:
+        assert Path(row["path"]).exists()
+
+
+def test_archiving_the_same_local_file_twice_copies_once(
+    conn: psycopg.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive_dir = tmp_path / "archive"
+    monkeypatch.setenv("COACH_FIT_ARCHIVE", str(archive_dir))
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    dropped = inbox / "zwift.fit"
+    dropped.write_bytes(ride_fit())
+
+    archive.scan(conn, inbox, DUBAI)
+    conn.commit()
+    archive.scan(conn, inbox, DUBAI)
+    conn.commit()
+
+    assert len(list(archive_dir.iterdir())) == 1
+    assert len(archive.restorable(conn)) == 1
+
+
+# --- GYM-08: the session count counts the gym group -------------------------
+
+
+def test_the_gym_count_knows_every_name_for_a_gym_session(conn: psycopg.Connection) -> None:
+    """The rollup listed two spellings beside a group that knows four.
+
+    The same drift as #27's ride matching and #29's power set, a third time.
+    Nothing writes 'gym' or 'strength' today, so this was latent — and it would
+    have stopped being latent silently, inside a number GYM-08 puts in front of
+    the athlete.
+    """
+    day = date(2026, 7, 27)
+    with conn.transaction(), conn.cursor() as cur:
+        for index, discipline in enumerate(review.equivalents("gym")):
+            cur.execute(
+                """
+                insert into sessions (source, discipline, name, started_at, local_date)
+                values ('chat', %s, %s, %s, %s)
+                """,
+                (
+                    discipline,
+                    f"{discipline} session",
+                    datetime(2026, 7, 27, 6 + index, tzinfo=UTC),
+                    day,
+                ),
+            )
+    conn.commit()
+
+    reconcile.recompute_rollups(conn)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("select gym_session_count from rollups where as_of = %s", (day,))
+        assert cur.fetchone()["gym_session_count"] == len(review.equivalents("gym"))

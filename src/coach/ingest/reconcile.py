@@ -20,6 +20,7 @@ from coach import feeds as feedmod
 from coach.ingest import activities as actmod
 from coach.ingest import archive as archivemod
 from coach.ingest import client as clientmod
+from coach.ingest import review as reviewmod
 
 log = logging.getLogger(__name__)
 
@@ -221,6 +222,15 @@ def recompute_rollups(conn: psycopg.Connection) -> int:
     MEM-08 requires these to be SQL rather than model arithmetic, so this is one
     statement. Weight trend and recovery deviation arrive with their own feeds.
 
+    **The gym count is the whole gym group**, taken from `review.equivalents`
+    rather than written out again here. It was a literal `('weighttraining',
+    'workout')` beside a group that also knows `gym` and `strength` — the same
+    drift that made a Zwift ride unable to close a ride prescription (#27) and a
+    gravel ride lose its power (#29), a third time. Latent rather than live,
+    because nothing writes those two spellings today; it would have stopped being
+    latent the first time anything did, silently, in a number GYM-08 puts in
+    front of the athlete.
+
     **Adherence excludes break days** (BREAK-02). A prescription suspended by a
     break is not counted in either the numerator or the denominator, so a
     fortnight in Italy leaves the rate where it was rather than at zero. That is
@@ -243,7 +253,7 @@ def recompute_rollups(conn: psycopg.Connection) -> int:
                      where s.local_date > d.day - interval '28 days'
                        and s.local_date <= d.day),
                    (select count(*) from sessions s
-                     where s.discipline in ('weighttraining', 'workout')
+                     where s.discipline = any(%(gym)s)
                        and s.local_date > d.day - interval '7 days'
                        and s.local_date <= d.day),
                    (select case when count(*) = 0 then null
@@ -263,6 +273,7 @@ def recompute_rollups(conn: psycopg.Connection) -> int:
                 gym_session_count = excluded.gym_session_count,
                 adherence_rate = excluded.adherence_rate,
                 computed_at = excluded.computed_at
-            """
+            """,
+            {"gym": reviewmod.equivalents("gym")},
         )
         return cur.rowcount

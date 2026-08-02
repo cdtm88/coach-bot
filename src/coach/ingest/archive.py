@@ -101,6 +101,41 @@ def keep_original(
         )
 
 
+def keep_local(conn: psycopg.Connection, path: Path, data: bytes) -> Discovered:
+    """FIT-15 for the watched folder: keep a copy, not a pointer.
+
+    `register` used to record the inbox path, which is a directory the athlete
+    owns and tidies. So for every file arriving this way the "permanent archive
+    that is never pruned" held no copy at all — only a row pointing at somebody
+    else's file, and `restore` reading it back would raise the moment that file
+    was moved or deleted. The archive existed for files it did not have.
+
+    Copied under its own name where that is free. Where it is not, and the bytes
+    differ, the sha is appended rather than the file being skipped: `register`
+    inserts `on conflict (path) do nothing`, so a sync tool that reuses one
+    filename for successive activities — which is exactly what a mounted device
+    does — silently left every file after the first unarchived.
+    """
+    sha = parse.content_hash(data)
+    known = _known(conn, sha)
+    if known is not None:
+        return Discovered(path, sha, len(data), known["session_id"], already_known=True)
+
+    # Stored decompressed for the same reason `keep_original` is: the extension
+    # says FIT and FIT-16 posts these back to an endpoint that reads the name.
+    canonical = parse.decompressed(data)
+    folder = archive_folder()
+    folder.mkdir(parents=True, exist_ok=True)
+
+    target = folder / path.name
+    if target.exists() and parse.content_hash(target.read_bytes()) != sha:
+        target = folder / f"{path.stem}-{sha[:12]}{path.suffix}"
+    if not target.exists():
+        target.write_bytes(canonical)
+
+    return register(conn, target, canonical)
+
+
 def ingest_file(
     conn: psycopg.Connection, path: Path, tz: ZoneInfo, data: bytes | None = None
 ) -> int | None:
@@ -111,7 +146,7 @@ def ingest_file(
     when intervals.icu is unreachable or the integration is gone.
     """
     payload = data if data is not None else path.read_bytes()
-    discovered = register(conn, path, payload)
+    discovered = keep_local(conn, path, payload)
     if discovered.already_known and discovered.session_id:
         return discovered.session_id
 
