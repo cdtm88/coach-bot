@@ -529,11 +529,30 @@ def test_rounding_a_figure_is_not_inventing_one(conn: psycopg.Connection) -> Non
     assert voice.check("He is 131 kg. What is coming up?", facts) is None
 
 
-def test_small_numbers_in_ordinary_prose_are_allowed() -> None:
-    """ "the first two weeks" is English, not a claim."""
+def test_small_whole_numbers_in_ordinary_prose_are_allowed() -> None:
+    """ "give it 2 more weeks" is English, not a claim."""
     facts = "Load: 420 over the week."
 
     assert voice.check("Give it 2 more weeks. 420 of load. What next?", facts) is not None
+
+
+def test_a_small_decimal_is_still_a_claim() -> None:
+    """The hole the free-number bar had, and the one that mattered most.
+
+    A decimal is never incidental in a coaching message: it is a rate, a weight,
+    a percentage, an intensity factor. "0.35 kg per week" sits under any sane
+    small-number bar and is exactly the figure HLTH-08 withholds until six
+    readings across three weeks have earned it. Having the trend module refuse a
+    rate and then letting the voicing step invent one would be worse than never
+    having gated it at all.
+    """
+    facts = (
+        "Weight: 128.9 kg on 2 August, from 11 readings over 10 days. "
+        "The trend is falling, though it is too early to put a rate on it."
+    )
+
+    assert voice.check("Falling at 0.35 kg per week. What next?", facts) is None
+    assert voice.check("128.9 kg and falling. What next?", facts) is not None
 
 
 def test_a_voiced_review_that_asks_a_second_question_is_discarded(

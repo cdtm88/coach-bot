@@ -42,9 +42,17 @@ PURPOSE = "review"
 # it catches a model that has started writing an essay, not one that ran long.
 MAX_CHARS = 2400
 
-# Numbers below this are ordinary prose — "a couple", "the first two weeks" —
-# and requiring them to appear in the facts would fail honest sentences. Above
-# it, a number the facts do not contain was invented.
+# Small *whole* numbers are ordinary prose — "give it 2 more weeks", "the first
+# three rides" — and requiring them to appear in the facts would fail honest
+# sentences. Above this, a number the facts do not contain was invented.
+#
+# Whole numbers only, and the distinction is not pedantry. A decimal is never
+# incidental in a coaching message: it is a rate, a weight, a percentage, an
+# intensity factor. "0.35 kg per week" is precisely the claim HLTH-08 gates and
+# it is under any sane free-integer bar, so a threshold that ignored the decimal
+# point would wave through the exact figure the trend module exists to withhold.
+# This was live for one commit and caught by running the guard against a rate
+# the claim ladder had already refused.
 FREE_INTEGER_MAX = 12
 
 _NUMBER = re.compile(r"\d+(?:[.,]\d+)?")
@@ -130,13 +138,13 @@ def _grounded(text: str, facts: str) -> bool:
         if match in facts:
             continue
         # A comma decimal is a formatting choice, not a different number.
-        if match.replace(",", ".") in facts:
+        normalised = match.replace(",", ".")
+        if normalised in facts:
             continue
-        try:
-            if float(match.replace(",", ".")) <= FREE_INTEGER_MAX:
-                continue
-        except ValueError:
-            pass
+        # Whole numbers only. A decimal that is not in the facts is a claim the
+        # facts did not make, however small it is.
+        if "." not in normalised and int(normalised) <= FREE_INTEGER_MAX:
+            continue
         log.warning("voiced review quoted %r, which is not in the facts", match)
         return False
     return True
