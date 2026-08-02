@@ -381,6 +381,14 @@ def update_statement(
     the watched folder labels every file a ride, so a golf round matched on
     content hash used to come back a ride, take power figures FIT-07 exists to
     withhold, and start being scored for compliance.
+
+    `backfilled` is not written here at all. It records how the row came to
+    exist, and no later call has anything to correct about that. Writing it was
+    dangerous in both directions: a live ingest touching a backfilled row cleared
+    the flag, which is the only thing standing between a ride from two years ago
+    and a review with a Telegram message attached (FIT-09); and a backfill
+    touching a row that arrived live and was reviewed marked history as silent
+    when it had already spoken.
     """
     sets = [
         "external_ref = coalesce(%(external_ref)s, external_ref)",
@@ -394,7 +402,6 @@ def update_statement(
         "duration_s = coalesce(%(duration_s)s, duration_s)",
         "distance_m = coalesce(%(distance_m)s, distance_m)",
         "elevation_m = coalesce(%(elevation_m)s, elevation_m)",
-        "backfilled = %(backfilled)s",
         "paired_event_id = coalesce(%(paired_event_id)s, paired_event_id)",
     ]
     if upstream_read:

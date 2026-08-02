@@ -865,6 +865,43 @@ def test_a_backfilled_session_is_never_reviewed(conn: psycopg.Connection) -> Non
     assert calls == [], "the note writer must not even be called for backfilled history"
 
 
+def test_a_later_ingest_does_not_un_backfill_a_row(conn: psycopg.Connection) -> None:
+    """The flag is how the row came to exist, and no later call corrects that.
+
+    It used to be written on every update, so any live-path ingest touching a
+    backfilled row cleared it — and that flag is the only thing standing between
+    a ride from two years ago and a review with a Telegram message attached. The
+    review path checks `backfilled`, so this is asserted there rather than only
+    on the column.
+    """
+    first = activities.ingest(conn, activity(), DUBAI, file_bytes=ride_fit(), backfilled=True)
+    conn.commit()
+
+    activities.ingest(conn, activity(), DUBAI, file_bytes=ride_fit())  # the live path
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("select backfilled from sessions where id = %s", (first.session_id,))
+        assert cur.fetchone()["backfilled"] is True
+
+    calls: list[int] = []
+    assert review.review(conn, first.session_id, lambda _: calls.append(1) or "note") is None
+    assert calls == [], "history spoke because an update cleared the flag"
+
+
+def test_a_backfill_does_not_mark_a_session_that_arrived_live(conn: psycopg.Connection) -> None:
+    """The other direction. History that already spoke was never silent."""
+    first = activities.ingest(conn, activity(), DUBAI, file_bytes=ride_fit())
+    conn.commit()
+
+    activities.ingest(conn, activity(), DUBAI, file_bytes=ride_fit(), backfilled=True)
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("select backfilled from sessions where id = %s", (first.session_id,))
+        assert cur.fetchone()["backfilled"] is False
+
+
 # --- FIT-11 / FIT-13: reconcile and rollups --------------------------------
 
 
