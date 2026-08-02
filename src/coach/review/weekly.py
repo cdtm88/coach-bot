@@ -45,6 +45,7 @@ import psycopg
 
 from coach.adjust import apply as adjustmod
 from coach.blocks import document as blockmod
+from coach.blocks import load as loadmod
 from coach.health import breaks as breakmod
 from coach.health import nutrition as nutmod
 from coach.health import recovery as recoverymod
@@ -56,7 +57,19 @@ log = logging.getLogger(__name__)
 # REV-02 names five. Intake is the sixth, because NUT-06 asks for it here by
 # name — "the weekly review includes intake adherence alongside training and
 # weight" — and a requirement that names the artefact belongs in the artefact.
-SECTIONS = ("Adherence", "Load", "Weight", "Recovery", "Goals", "Intake")
+#
+# Effort and Ahead are the seventh and eighth, and neither is in the PRD. They
+# are here because the review was answering the wrong question. Load is training
+# stress on GYM-08's combined scale, which is the right number for deciding next
+# week's ceiling and tells the athlete nothing about what he did: "440 over the
+# week" is not a week anyone recognises. Effort is the week he actually had —
+# how many times he went out, for how long, how far. Ahead is the other half of
+# the same complaint: a review that only looks backwards is a report, and what
+# makes a review worth reading on a Sunday evening is the session it points at.
+#
+# Effort leads. The week he had comes before the week he was scored against,
+# because one of those is his and the other is the plan's opinion of it.
+SECTIONS = ("Effort", "Adherence", "Load", "Weight", "Recovery", "Goals", "Intake", "Ahead")
 
 
 @dataclass(frozen=True)
@@ -80,10 +93,20 @@ class Section:
     quiet_as: str | None = None
 
     # A shorter body for the message, where the record's is longer than the
-    # athlete needs. Only the goals section sets it, and it may only ever be a
-    # subset of `body` — a message that says something the record does not is
-    # the bug MEM-08 exists to prevent, arriving by a side door.
+    # athlete needs. It may only ever be a subset of `body` — a message that
+    # says something the record does not is the bug MEM-08 exists to prevent,
+    # arriving by a side door.
     said_as: str | None = None
+
+    # Kept in the record, never said, and not counted as an absence either.
+    #
+    # Only Goals sets it. His goals are a two year target he stated himself and
+    # has not forgotten, and reciting them back every Sunday is the review
+    # padding itself with the one thing in it he already knows. They stay in the
+    # facts because the coach needs to know what the week is for before he can
+    # say why it mattered. Knowing it and reciting it are different things, and
+    # the difference is the whole point of this flag.
+    record_only: bool = False
 
     @property
     def quiet_label(self) -> str:
@@ -94,9 +117,18 @@ class Section:
         return self.said_as or self.body
 
 
+# Past this many empty sections, naming them is worse than not. Listing five
+# things that did not happen is a longer sentence than "nothing happened" and
+# carries less: he does not need to be told that a week with no sessions in it
+# also had no training load. The record still names every one of them.
+QUIET_ENUMERATION_MAX = 3
+
+
 def _quiet_line(sections: list[Section]) -> str:
     """The sections with nothing in them, collapsed into one clause."""
     labels = [s.quiet_label for s in sections]
+    if len(labels) > QUIET_ENUMERATION_MAX:
+        return "Nothing recorded this week."
     if len(labels) == 1:
         joined = labels[0]
     else:
@@ -119,11 +151,11 @@ class Review:
 
     @property
     def notable(self) -> list[Section]:
-        return [s for s in self.sections if s.notable]
+        return [s for s in self.sections if s.notable and not s.record_only]
 
     @property
     def quiet(self) -> list[Section]:
-        return [s for s in self.sections if not s.notable]
+        return [s for s in self.sections if not s.notable and not s.record_only]
 
     def render(self) -> str:
         """The record: every section, in REV-02's order, keyed by the Sunday.
@@ -231,6 +263,67 @@ def adherence_section(conn: psycopg.Connection, week_ending: date) -> Section:
     return Section("Adherence", body + ".")
 
 
+def _hours(seconds: int) -> str:
+    """Duration the way it is said out loud, not as a count of minutes."""
+    minutes = round(seconds / 60)
+    if minutes < 60:
+        return f"{minutes} min"
+    hours, rest = divmod(minutes, 60)
+    return f"{hours}h" if rest == 0 else f"{hours}h {rest:02d}m"
+
+
+def effort_section(conn: psycopg.Connection, week_ending: date) -> Section:
+    """What the week actually was: how often he went out, how long, how far.
+
+    Sessions rather than prescriptions, because this is the week he had and not
+    the week he was given. A ride nobody prescribed still cost him three hours,
+    and a review that counts only what it asked for is reading its own homework.
+
+    Counted in SQL for the same reason every other figure here is (MEM-08), and
+    the unreadable ones are counted separately rather than dropped: FIT-15's
+    `data_unavailable` means he trained and the file did not survive, which is
+    the one case where a zero would be a lie about the athlete rather than
+    about the data.
+    """
+    since, until = _week(week_ending)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select count(*)::int                                  as n,
+                   coalesce(sum(duration_s) filter
+                            (where not data_unavailable), 0)::int  as duration_s,
+                   coalesce(sum(distance_m) filter
+                            (where not data_unavailable), 0)       as distance_m,
+                   count(*) filter (where data_unavailable)::int   as unreadable
+              from sessions
+             where local_date between %s and %s
+            """,
+            (since, until),
+        )
+        row = cur.fetchone() or {}
+
+    total = row.get("n") or 0
+    if not total:
+        return Section("Effort", "nothing recorded.", notable=False, quiet_as="completed sessions")
+
+    parts = [f"{total} session{'' if total == 1 else 's'}"]
+    if row.get("duration_s"):
+        parts.append(_hours(row["duration_s"]))
+    # Rounded to the kilometre. A weekly total quoted to the metre invites a
+    # comparison with last week's metre, which is noise wearing a number's
+    # clothes.
+    if row.get("distance_m") and row["distance_m"] >= 1000:
+        parts.append(f"{int(Decimal(row['distance_m']) / 1000)} km")
+
+    body = ", ".join(parts)
+    if row.get("unreadable"):
+        body += (
+            f" ({row['unreadable']} of them with no usable file, so the time and "
+            "distance are short by whatever those were)"
+        )
+    return Section("Effort", body + ".")
+
+
 def load_section(conn: psycopg.Connection, week_ending: date) -> Section:
     """GYM-08's combined scale, which is what makes one number cover both."""
     now = _rollup(conn, week_ending)
@@ -251,7 +344,8 @@ def load_section(conn: psycopg.Connection, week_ending: date) -> Section:
     if now.get("load_28d") is not None:
         body += f"; {int(now['load_28d'])} over 28 days"
     if now.get("gym_session_count"):
-        body += f"; {now['gym_session_count']} gym session(s)"
+        gym = now["gym_session_count"]
+        body += f"; {gym} gym session{'' if gym == 1 else 's'}"
     return Section("Load", body + ".")
 
 
@@ -299,18 +393,24 @@ def recovery_section(conn: psycopg.Connection, week_ending: date) -> Section:
     return Section("Recovery", f"{reading} across {len(usable)} scored day(s).")
 
 
-# How much of the block's goals section the message quotes. The block document
-# is written for the coach and runs to paragraphs of reasoning about what the
-# block is for; the athlete stated the goals and does not need them recited at
-# length every Sunday. The record keeps the whole thing.
-GOALS_MESSAGE_PARAGRAPHS = 1
-
-
 def goals_section(conn: psycopg.Connection, week_ending: date) -> Section:
-    """REV-02's fifth: progress against what the block says it is for."""
+    """REV-02's fifth: what the block says it is for. Recorded, never recited.
+
+    This is the section the athlete asked to stop reading, and he was right to.
+    They are his own two year goals, stated by him, unchanged since the block
+    opened, and quoting them back at him every Sunday is the review filling
+    space with the one thing in it he is certain of. Worse, it is the longest
+    section, so the message led with the least new information in it.
+
+    `record_only` rather than deletion, because the coach still has to know
+    what the week was for. The voicing prompt is given the whole review and told
+    that this section is context and not content: it is the difference between
+    "that ride was the aerobic base showing up" and "your goal is to get under
+    100 kg", and only the first is worth his evening.
+    """
     block = blockmod.active(conn)
     if block is None:
-        return Section("Goals", "no active block.", notable=False, quiet_as="an active block")
+        return Section("Goals", "no active block.", notable=False, record_only=True)
 
     stated = blockmod.section_of(block.content, "goals").strip()
     if not stated:
@@ -318,21 +418,78 @@ def goals_section(conn: psycopg.Connection, week_ending: date) -> Section:
             "Goals",
             f"block {block.id} is active but states no goals.",
             notable=False,
-            quiet_as="stated goals",
+            record_only=True,
         )
-    return Section("Goals", stated, said_as=_lead(stated))
+    return Section("Goals", stated, record_only=True)
 
 
-def _lead(body: str) -> str:
-    """The lead paragraph of the goals section, which is the goals themselves.
+def _describe(discipline: str, spec: dict[str, Any]) -> str:
+    """A prescription as a phrase. `notify/daily.py` says it the same way.
 
-    Block documents put the goals first and the reasoning after, so taking the
-    first paragraph is not a summary — it is the part that was addressed to the
-    athlete in the first place. A block that does not follow the convention
-    loses nothing the record does not still hold.
+    Its `_describe` is not imported and this is not quite a duplicate: the
+    morning message names one session on the day it happens, so it needs no day
+    and no ranking. Sharing the function would mean one of the two callers
+    passing a flag to suppress half of it, which is how two clear sentences
+    become one unclear one.
     """
-    paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
-    return "\n\n".join(paragraphs[:GOALS_MESSAGE_PARAGRAPHS]) or body
+    parts = [discipline]
+    minutes = int((spec.get("duration_s") or 0) / 60)
+    if minutes:
+        parts.append(f"{minutes} min")
+    described = ", ".join(parts)
+    purpose = spec.get("purpose")
+    return f"{described}, {purpose}" if purpose else described
+
+
+def ahead_section(conn: psycopg.Connection, week_ending: date) -> Section:
+    """What is prescribed for the week that starts tomorrow, and the one that
+    carries it.
+
+    **The key session is the heaviest, and that is a rule rather than a
+    judgement.** `blocks/load.of_spec` is the same function BLOCK-07's ramp
+    limit is enforced with, so the session named here is the one the week is
+    actually built around rather than the one that reads most impressively. A
+    model asked to pick would pick differently on identical weeks, and "which
+    session matters" is not a question anyone should have to re-litigate every
+    Sunday.
+
+    Ties break toward the earlier session: two sessions of equal weight and the
+    one he reaches first is the one worth flagging.
+    """
+    since = week_ending + timedelta(days=1)
+    until = week_ending + timedelta(days=7)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select planned_for, discipline, spec
+              from prescriptions
+             where (planned_for at time zone 'UTC')::date between %s and %s
+               and status in ('planned', 'adjusted')
+             order by planned_for
+            """,
+            (since, until),
+        )
+        rows = cur.fetchall()
+
+    if not rows:
+        # Notable even though it is an absence, and the only section that is.
+        # An empty week ahead is not a quiet week, it is a week nobody has
+        # written yet, and burying that in the "nothing happened" line is how he
+        # finds out on Tuesday. Everything else in the quiet line is a fact
+        # about a week that is over and cannot be acted on.
+        return Section("Ahead", "nothing prescribed for next week yet.")
+
+    total = len(rows)
+    heaviest = max(rows, key=lambda r: loadmod.of_spec(r["discipline"], r["spec"] or {}))
+    day = heaviest["planned_for"].strftime("%A")
+    described = _describe(heaviest["discipline"], heaviest["spec"] or {})
+
+    body = f"{total} session{'' if total == 1 else 's'} prescribed. "
+    if total == 1:
+        body += f"{day}: {described}."
+    else:
+        body += f"The one that carries the week is {day}: {described}."
+    return Section("Ahead", body)
 
 
 def intake_section(conn: psycopg.Connection, week_ending: date) -> Section:
@@ -382,12 +539,14 @@ def decisions(conn: psycopg.Connection, week_ending: date) -> list[str]:
 def build(conn: psycopg.Connection, week_ending: date) -> Review:
     """Assemble the review. Reads everything, writes nothing."""
     sections = [
+        effort_section(conn, week_ending),
         adherence_section(conn, week_ending),
         load_section(conn, week_ending),
         weight_section(conn, week_ending),
         recovery_section(conn, week_ending),
         goals_section(conn, week_ending),
         intake_section(conn, week_ending),
+        ahead_section(conn, week_ending),
     ]
     return Review(
         week_ending=week_ending,

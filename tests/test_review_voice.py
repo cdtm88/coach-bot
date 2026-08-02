@@ -13,12 +13,13 @@ path would hand that property straight back if the guard were not real.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 
 import conftest
 from coach.blocks import document as blockmod
@@ -56,6 +57,52 @@ class FakeModel:
 class ExplodingModel:
     def __call__(self, *a, **kw):
         raise RuntimeError("the API is down")
+
+
+def session(
+    conn: psycopg.Connection,
+    on: date,
+    duration_s: int | None = None,
+    distance_m: int | None = None,
+    unreadable: bool = False,
+) -> None:
+    """One completed activity on a day, however it got there."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "insert into sessions (source, discipline, started_at, local_date, "
+            "duration_s, distance_m, data_unavailable) "
+            "values ('intervals', 'ride', %s, %s, %s, %s, %s)",
+            (
+                datetime.combine(on, datetime.min.time()).replace(hour=7, tzinfo=UTC),
+                on,
+                duration_s,
+                distance_m,
+                unreadable,
+            ),
+        )
+
+
+def prescribe_ahead(
+    conn: psycopg.Connection,
+    on: date,
+    duration_s: int,
+    intensity_factor: float,
+    purpose: str | None = None,
+) -> None:
+    """A planned session, with enough spec for `load.of_spec` to weigh it."""
+    spec: dict[str, Any] = {"duration_s": duration_s, "intensity_factor": intensity_factor}
+    if purpose:
+        spec["purpose"] = purpose
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "insert into prescriptions (block_id, planned_for, discipline, spec, status) "
+            "values (%s, %s, 'ride', %s, 'planned')",
+            (
+                conftest.ensure_block(conn),
+                datetime.combine(on, datetime.min.time()).replace(hour=18, tzinfo=UTC),
+                Jsonb(spec),
+            ),
+        )
 
 
 def weigh_in(conn: psycopg.Connection) -> None:
@@ -144,9 +191,20 @@ def test_a_quiet_week_is_one_line_not_six(conn: psycopg.Connection) -> None:
     """
     said = weekly.build(conn, SUNDAY).message()
 
-    assert said.count("Nothing on") == 1
-    for title in ("Adherence:", "Load:", "Weight:", "Recovery:", "Intake:"):
+    for title in ("Effort:", "Adherence:", "Load:", "Weight:", "Recovery:", "Intake:"):
         assert title not in said
+
+
+def test_a_few_empty_sections_are_named(conn: psycopg.Connection) -> None:
+    """Up to the enumeration cap, saying which is more useful than not."""
+    session(conn, SUNDAY - timedelta(days=2), duration_s=3600, distance_m=30000)
+    prescribe(conn, SUNDAY - timedelta(days=2), "completed")
+    rollup(conn, SUNDAY, load_7d=Decimal(420))
+    weigh_in(conn)
+
+    said = weekly.build(conn, SUNDAY).message()
+
+    assert "Nothing on recovery scoring and logged intake this week." in said
 
 
 def test_the_record_keeps_every_section_even_when_the_message_drops_it(
@@ -173,7 +231,7 @@ def test_a_section_with_something_in_it_is_kept(conn: psycopg.Connection) -> Non
 
     assert "Adherence: 1 of 2" in said
     assert "Load: 420 over the week" in said
-    assert "Nothing on" in said  # and the rest collapsed
+    assert "Nothing recorded this week." in said  # and the rest collapsed
 
 
 def test_the_sections_are_separated_so_they_can_be_read_on_a_phone(
@@ -196,14 +254,12 @@ def test_the_date_is_said_the_way_a_person_says_it(conn: psycopg.Connection) -> 
     assert "2026-08-02" not in said
 
 
-def test_the_message_quotes_the_goals_and_not_the_block_document(
-    conn: psycopg.Connection,
-) -> None:
-    """Block documents state the goals, then reason about them at length.
+def test_the_goals_are_recorded_and_never_recited(conn: psycopg.Connection) -> None:
+    """He set them, they have not moved, and he does not need them read back.
 
-    The reasoning is written for the coach. Reciting it back every Sunday is
-    what turned the goals section into three sentences about what the block is
-    for.
+    They stay in the record, and therefore in the facts the voicing call is
+    given, because the coach has to know what the week was for before he can say
+    why it mattered. Knowing and reciting are different things.
     """
     block_id = conftest.ensure_block(conn)
     blockmod.rewrite(
@@ -212,17 +268,143 @@ def test_the_message_quotes_the_goals_and_not_the_block_document(
         "goals",
         "Under 100 kg, and weight that stays off.\n\n"
         "The block's own job is narrower: build an aerobic base that does not "
-        "exist yet, and put the first load through a lower body that has never "
-        "had any.",
+        "exist yet.",
         reason="test",
     )
     blockmod.activate(conn, block_id)
 
     review = weekly.build(conn, SUNDAY)
 
+    assert "Under 100 kg" in review.render()
     assert "The block's own job" in review.render()
-    assert "The block's own job" not in review.message()
-    assert "Under 100 kg" in review.message()
+    assert "Under 100 kg" not in review.message()
+    assert "Goals:" not in review.message()
+
+
+def test_an_absent_goals_section_is_not_reported_as_a_quiet_week(
+    conn: psycopg.Connection,
+) -> None:
+    """Record-only is a third state, not a quiet one.
+
+    "Nothing on stated goals this week" would be the review complaining to the
+    athlete about its own configuration.
+    """
+    said = weekly.build(conn, SUNDAY).message()
+
+    assert "goals" not in said.lower()
+
+
+# --- the effort, which is the week he actually had --------------------------
+
+
+def test_the_effort_section_counts_what_he_actually_did(conn: psycopg.Connection) -> None:
+    """Load is training stress. "440 over the week" is not a week anyone had."""
+    session(conn, SUNDAY - timedelta(days=4), duration_s=3600, distance_m=32000)
+    session(conn, SUNDAY - timedelta(days=2), duration_s=5400, distance_m=48000)
+
+    body = weekly.effort_section(conn, SUNDAY).body
+
+    assert "2 sessions" in body
+    assert "2h 30m" in body
+    assert "80 km" in body
+
+
+def test_effort_counts_a_session_nobody_prescribed(conn: psycopg.Connection) -> None:
+    """This is the week he had, not the week he was given.
+
+    A ride nobody asked for still cost him the time, and a review that counts
+    only what it prescribed is reading its own homework.
+    """
+    session(conn, SUNDAY - timedelta(days=3), duration_s=3600, distance_m=30000)
+
+    assert "1 session" in weekly.effort_section(conn, SUNDAY).body
+
+
+def test_an_unreadable_file_is_counted_and_flagged(conn: psycopg.Connection) -> None:
+    """FIT-15: he trained and the file did not survive.
+
+    A zero here would be a lie about the athlete rather than about the data.
+    """
+    session(conn, SUNDAY - timedelta(days=2), duration_s=3600, distance_m=30000)
+    session(conn, SUNDAY - timedelta(days=1), duration_s=None, unreadable=True)
+
+    body = weekly.effort_section(conn, SUNDAY).body
+
+    assert "2 sessions" in body
+    assert "no usable file" in body
+
+
+def test_the_effort_section_leads_the_message(conn: psycopg.Connection) -> None:
+    """What he did comes before the plan's opinion of what he did."""
+    session(conn, SUNDAY - timedelta(days=2), duration_s=3600, distance_m=30000)
+    prescribe(conn, SUNDAY - timedelta(days=2), "completed")
+
+    said = weekly.build(conn, SUNDAY).message()
+
+    assert said.index("Effort:") < said.index("Adherence:")
+
+
+# --- next week, and the session that carries it -----------------------------
+
+
+def test_the_key_session_is_the_heaviest_one_prescribed(conn: psycopg.Connection) -> None:
+    """A rule, not a judgement.
+
+    `blocks.load.of_spec` is the same function BLOCK-07's ramp limit is enforced
+    with, so the session named is the one the week is built around. A model
+    asked to pick would pick differently on identical weeks.
+    """
+    prescribe_ahead(conn, SUNDAY + timedelta(days=1), duration_s=2700, intensity_factor=0.62)
+    prescribe_ahead(
+        conn,
+        SUNDAY + timedelta(days=3),
+        duration_s=5400,
+        intensity_factor=0.85,
+        purpose="threshold work",
+    )
+    prescribe_ahead(conn, SUNDAY + timedelta(days=5), duration_s=3600, intensity_factor=0.65)
+
+    body = weekly.ahead_section(conn, SUNDAY).body
+
+    assert "3 sessions prescribed" in body
+    assert "Wednesday" in body
+    assert "threshold work" in body
+
+
+def test_the_week_ahead_stops_at_seven_days(conn: psycopg.Connection) -> None:
+    """Next week, not the rest of the block."""
+    prescribe_ahead(conn, SUNDAY + timedelta(days=3), duration_s=3600, intensity_factor=0.65)
+    prescribe_ahead(conn, SUNDAY + timedelta(days=9), duration_s=7200, intensity_factor=0.9)
+
+    assert "1 session prescribed" in weekly.ahead_section(conn, SUNDAY).body
+
+
+def test_this_week_is_not_mistaken_for_next_week(conn: psycopg.Connection) -> None:
+    """The boundary is the Sunday itself, which belongs to the week under review."""
+    prescribe(conn, SUNDAY, "planned")
+
+    assert "nothing prescribed for next week" in weekly.ahead_section(conn, SUNDAY).body
+
+
+def test_an_empty_week_ahead_is_said_rather_than_buried(conn: psycopg.Connection) -> None:
+    """The one absence that is not a quiet week.
+
+    Nothing prescribed for next week means nobody has written it yet, and
+    folding that into the "nothing happened" line is how he finds out on
+    Tuesday.
+    """
+    said = weekly.build(conn, SUNDAY).message()
+
+    assert "Ahead: nothing prescribed for next week yet." in said
+
+
+def test_a_completely_empty_week_does_not_enumerate_its_own_absences(
+    conn: psycopg.Connection,
+) -> None:
+    """Five things that did not happen is longer than "nothing happened"."""
+    said = weekly.build(conn, SUNDAY).message()
+
+    assert "Nothing recorded this week." in said
 
 
 def test_the_message_asks_exactly_one_question(conn: psycopg.Connection) -> None:

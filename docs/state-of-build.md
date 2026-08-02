@@ -195,6 +195,37 @@ the same ladder off the same `Claims` so that rewording cannot loosen a gate —
 the existing threshold-drift test caught the first attempt reaching past
 `Claims` to `fit.n`, which is exactly the drift the split risks.
 
+**Then the review turned out to be answering the wrong question.** It reported
+Load — training stress on GYM-08's combined scale — and never once said what he
+did. "440 over the week" is the right number for setting next week's ceiling and
+is not a week anyone recognises. `Effort` is new and reads `sessions`: how many
+times he went out, for how long, how far, counted from what actually landed
+rather than from what was prescribed, because a ride nobody asked for still cost
+him the time. `data_unavailable` sessions are counted and flagged rather than
+dropped (FIT-15) — a zero there would be a lie about the athlete rather than
+about the data.
+
+`Ahead` is the other half. A review that only looks backwards is a report; what
+makes one worth reading on a Sunday evening is the session it points at. It
+reads the seven days after the Sunday and names the heaviest, ranked by
+`blocks.load.of_spec` — the same function BLOCK-07's ramp limit is enforced
+with, so the session named is the one the week is actually built around. A model
+asked to pick would pick differently on identical weeks, and "which session
+matters" should not be re-litigated every Sunday. It is also the one absence
+that stays in the message rather than collapsing into the quiet line: nothing
+prescribed for next week means nobody has written it yet, and burying that is
+how he finds out on Tuesday.
+
+**Goals became record-only, which is a third state and not a deletion.** They
+are his own two year targets, stated by him, unchanged since the block opened,
+and they were the longest section in the message — so the review led with the
+one thing in it he was already certain of. They stay in the record and therefore
+in the facts the voicing call is given, because the coach has to know what the
+week was for before he can say why it mattered. Knowing it and reciting it are
+different things, and `record_only` is that difference. It also does not count
+as an absence: "Nothing on stated goals this week" would be the review
+complaining to the athlete about its own configuration.
+
 **Voicing puts the model back on the output path, one way only.** `voice.say`
 takes the finished assembly and the persona and asks for it in the coach's own
 words. It may reorder, cut and rephrase; it may not add a number, and `_grounded`
