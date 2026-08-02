@@ -25,9 +25,12 @@
 | — | The runtime: `coach-agent`, `coach-scheduler`, OBS-07's stop (PR #12) | merged |
 | — | P02's proposer, so consolidation actually runs (CONS-02, PR #13) | merged |
 | P08 | Publishing upstream and athlete edit detection (PLAN-01 to PLAN-12) | merged (PR #16) |
-| P09 | Bounded mid-week adjustment authority (ADJ-01 to ADJ-08) | built |
+| P09 | Bounded mid-week adjustment authority (ADJ-01 to ADJ-08) | merged (PR #17) |
+| — | Docker image, compose stack, MEM-12's pg_dump sidecar (PR #18) | merged |
+| — | libpq connection route, for a Postgres deployed separately (PR #19) | merged |
+| — | The four defects that only appear once deployed (PR #20) | merged |
 
-630 tests, all against a real Postgres. Schema is at migration 013; the
+643 tests, all against a real Postgres. Schema is at migration 013; the
 scheduler's own ledger is created on first use rather than as a migration,
 because it is process bookkeeping rather than part of the memory design.
 
@@ -35,9 +38,16 @@ because it is process bookkeeping rather than part of the memory design.
 the intervals.icu calendar and accepts the athlete's edits back; P09 lets a
 session reshape the rest of that week, downward only.
 
+**And it is deployed.** Since 2 August the stack runs on the athlete's own
+server against a Postgres it did not deploy, and a message to the bot gets a
+reply. That is the first time the whole path has existed at once: Telegram, the
+allowlist, the database, the model, and back.
+
 Next is **P10** — the weekly review and the daily rhythm (REV, NOTIF, BREAK, NUT,
 LOG). Nothing is gated on a live check any more: V1 and V4 are both run and
 recorded below.
+
+Then **P11** — collapsing the running containers, described under "What runs".
 
 Two soak gates are waiting on the athlete and neither blocks anything: HealthBridge
 writing body mass, and the secret iCal addresses in `CALENDAR_ICS_URLS`. Both
@@ -66,6 +76,64 @@ at each seam was simply nobody's phase. `src/coach/runtime/` is where it lives
 now, and it holds no opinions: every rule it applies — the interruption budget,
 the naturalness checks, the conflict matrix — already had a home, and this calls
 them in order.
+
+### P11: six containers, and how many of them should exist
+
+Deployed, the stack is six containers: `coach-db`, `coach-db-backup`,
+`coach-migrate`, `coach-agent`, `coach-ingest`, `coach-scheduler`. For a
+single-user system on one box that is a lot of moving parts to look at, and the
+ask is to get it to one. Worth being precise about which of the five merges are
+real, because they are not equally good.
+
+**`coach-migrate` is not a process.** It runs once, exits 0, and exists as a
+container only because `depends_on: service_completed_successfully` is the
+ordering primitive Compose gives you. It cannot simply be folded into the other
+three: three containers each applying migrations at boot is three racing
+writers, and the ledger's primary key would turn that into two crashes and one
+success. It disappears *for free* the moment the three become one, because then
+there is a single startup sequence to put it in. This merge is pure gain.
+
+**The three long-running processes can merge, and the cost is real but bounded.**
+They are separate today because they fail independently: a wedged Telegram long
+poll must not stop activity ingest. Merging them means a supervisor — and the
+code is already shaped for it, since `runtime.agent.serve` takes a
+`threading.Event` and the scheduler and ingest loops are both interruptible. The
+work is not starting three threads; it is making a thread that dies get noticed,
+restarted, and logged, which is precisely the job Docker's `restart:
+unless-stopped` does for free today. Doing it worse than Docker does it is the
+failure mode to design against, so the acceptance test is a killed loop, not a
+happy start.
+
+What it buys: one log stream instead of three, one restart, and roughly two
+thirds of the memory back — three CPython interpreters each holding the same
+imports is the single largest waste in the current deployment.
+
+**Postgres should stay out of it.** Folding `coach-db` in is where "one
+container" stops being tidying and starts being a different system. The database
+here was deployed independently, with its own conventions, its own backup
+sidecar and its own retention; PR #19 exists because the *application* adapted to
+that rather than the other way round. Putting Postgres in the coach's container
+would couple `pgdata`'s lifetime to an application restart and make every future
+image rebuild a database event. `coach-db-backup` could reasonably fold into
+`coach-db` as a cron inside it, but that is the database stack's call and not
+this project's.
+
+So the honest target is **three** — `coach-db`, `coach-db-backup` and `coach` — and
+six to three is where nearly all the benefit is. One is achievable and is not
+recommended; if it is wanted anyway, it should be a deliberate decision recorded
+here rather than a consequence of this phase.
+
+Acceptance, when it is written:
+
+- One application container. Migrations run once, before anything else starts,
+  and a failure there stops the container rather than starting the loops
+  against an empty schema, which is exactly what PR #20 had to fix.
+- Each loop restarts on its own after a crash, without taking the others down,
+  and the restart is visible in the log rather than silent.
+- `docker stop` drains and exits inside the grace period, with the Telegram
+  offset unadvanced for any turn that did not complete.
+- The three console scripts still exist and still work, because running one loop
+  alone is how they are debugged.
 
 ### P09: the asymmetry, in three modules
 
