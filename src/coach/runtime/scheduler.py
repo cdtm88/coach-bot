@@ -300,6 +300,46 @@ def sweep_job(api: Any, tz: Any = None) -> Callable[[psycopg.Connection, date], 
     return job
 
 
+def publish_job(api: Any, tz: Any = None) -> Callable[[psycopg.Connection, date], Any]:
+    """PLAN-01: put whatever the coach has planned onto the calendar.
+
+    This had no caller at all until it was noticed on a live deployment. The
+    publish path, PLAN-04's placement and the workout text were all built and
+    tested in P08, and nothing ever invoked them, so a prescription written in
+    conversation stayed in the database and never reached intervals.icu.
+
+    Nightly rather than in the turn, for LOG-08's reason: a conversation must
+    not wait on a network call, and a failed publish must not lose a plan the
+    athlete has just agreed to.
+    """
+
+    def job(conn: psycopg.Connection, _on: date) -> Any:
+        from coach.plans import publish as publishmod
+
+        zone = tz or clock.configured_tz()
+        result = publishmod.publish(conn, api, zone)
+        if result.published or result.unplaceable:
+            log.info(
+                "published %d prescription(s), %d unplaceable",
+                len(result.published),
+                len(result.unplaceable),
+            )
+        return result
+
+    return job
+
+
+def _publish_or_none(tz: Any) -> Callable[[psycopg.Connection, date], Any] | None:
+    """Its own client, for the same reason the sweep has one."""
+    try:
+        from coach.ingest import client as clientmod
+
+        return publish_job(clientmod.Intervals(), tz)
+    except Exception as exc:  # noqa: BLE001 - a missing key must not stop the night
+        log.warning("PLAN-01 publish not scheduled: %s", exc)
+        return None
+
+
 def _sweep_or_none(tz: Any) -> Callable[[psycopg.Connection, date], Any] | None:
     """PLAN-05's job with its own upstream client, or nothing plus a warning.
 
@@ -438,6 +478,7 @@ def main() -> None:
     # Its own client, constructed here: an INTERVALS_API_KEY that is absent or
     # wrong should stop the sweep, not the two jobs that need no network.
     sweep = _sweep_or_none(zone)
+    publish = _publish_or_none(zone)
 
     # P10's three, each on its own hour. They need a transport rather than a
     # model: the review is assembled deterministically and the two nudges are
@@ -447,6 +488,9 @@ def main() -> None:
 
     jobs: dict[str, Job | Callable[[psycopg.Connection, date], Any]] = {
         "consolidation": consolidate,
+        # PLAN-01 before PLAN-05: an event published tonight must not be swept
+        # as an orphan on the same pass.
+        **({"publish": publish} if publish else {}),
         **({"sweep": sweep} if sweep else {}),
         "decay": decay_job,
         "export": export_job,

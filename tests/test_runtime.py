@@ -759,3 +759,39 @@ def test_only_the_transport_talks_to_telegram() -> None:
         if p.name != "transport.py" and re.search(r"api\.telegram\.org", p.read_text())
     ]
     assert offenders == []
+
+
+# --- the tools and jobs that existed and were never reachable ----------------
+
+
+def test_no_tool_is_still_marked_deferred() -> None:
+    """Found on a live deployment: the coach said it could not see session history.
+
+    `get_sessions` was flagged "deferred to P03" and `write_session_events`
+    "deferred to P08", both long since shipped, so `dispatch` returned an
+    unavailable payload and the model reported that honestly. A phase marker
+    that outlives its phase is worse than no marker: it makes the model lie
+    accurately.
+    """
+    from coach.agent import tools
+
+    assert tools.DEFERRED == {}
+
+
+def test_the_publish_pass_is_registered_as_a_job() -> None:
+    """PLAN-01 was built, tested, and called by nothing.
+
+    Same class of gap as the consolidation proposer: a whole path with no
+    caller, invisible to every unit test because each piece works.
+    """
+    assert callable(scheduler.publish_job)
+
+    published: list[str] = []
+
+    class FakeApi:
+        def upsert_events(self, events):
+            published.extend(e.get("external_id", "?") for e in events)
+            return events
+
+    job = scheduler.publish_job(FakeApi(), DUBAI)
+    assert callable(job)

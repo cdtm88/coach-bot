@@ -15,6 +15,7 @@ from datetime import date, datetime
 from typing import Any
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from coach import clock
 from coach.blocks import document as blockmod
@@ -26,10 +27,7 @@ from coach.memory import notes as notemod
 from coach.memory import state as statemod
 
 # Phase that lands each deferred tool, surfaced in its unavailable result.
-DEFERRED = {
-    "get_sessions": "P03",
-    "write_session_events": "P08",
-}
+DEFERRED: dict[str, str] = {}
 
 SCHEMAS: list[dict[str, Any]] = [
     {
@@ -330,6 +328,85 @@ def dispatch(conn: psycopg.Connection, name: str, arguments: dict[str, Any]) -> 
             "break_id": break_id,
             "suspended": len(suspended.prescription_ids) if suspended else 0,
             "open_ended": ends_on is None or arguments["kind"] == "illness",
+        }
+
+    if name == "get_sessions":
+        # FIT-01. Individual rows for discussion, never for arithmetic: the
+        # description says so and the rollups in the prompt are where totals
+        # come from. Capped because a year of rides would eat the MEM-11 budget
+        # in one tool result.
+        until = arguments.get("until")
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select id, local_date, discipline, activity_type, name, duration_s,
+                       avg_power_w, np_power_w, avg_hr, max_hr, avg_cadence, source,
+                       derived
+                  from sessions
+                 where local_date >= %s
+                   and (%s::date is null or local_date <= %s)
+                   and (%s::text is null or discipline = %s)
+                 order by local_date desc, id desc
+                 limit 60
+                """,
+                (
+                    date.fromisoformat(arguments["since"]),
+                    until,
+                    until,
+                    arguments.get("discipline"),
+                    arguments.get("discipline"),
+                ),
+            )
+            rows = cur.fetchall()
+        return {
+            "sessions": [
+                {
+                    "id": r["id"],
+                    "local_date": _serialise(r["local_date"]),
+                    "discipline": r["discipline"],
+                    "name": r["name"],
+                    "duration_s": r["duration_s"],
+                    "avg_power_w": _serialise(r["avg_power_w"]),
+                    "np_power_w": _serialise(r["np_power_w"]),
+                    "avg_hr": r["avg_hr"],
+                    "max_hr": r["max_hr"],
+                    "avg_cadence": _serialise(r["avg_cadence"]),
+                    "source": r["source"],
+                    "load": (r["derived"] or {}).get("icu_training_load"),
+                }
+                for r in rows
+            ],
+            "caveat": "Individual rows. Totals come from the rollups already in context.",
+        }
+
+    if name == "write_session_events":
+        # PLAN-01, written locally and published by the scheduler rather than
+        # from inside the turn. The same reasoning as LOG-08: a conversation
+        # must not wait on intervals.icu, and a network failure must not lose a
+        # plan the athlete has just agreed to.
+        block = blockmod.active(conn)
+        if block is None:
+            return {"available": False, "reason": "there is no active training block yet"}
+
+        written = []
+        with conn.transaction(), conn.cursor() as cur:
+            for event in arguments["events"]:
+                cur.execute(
+                    "insert into prescriptions (block_id, planned_for, discipline, spec, "
+                    "status) values (%s, %s, %s, %s, 'planned') returning id",
+                    (
+                        block.id,
+                        datetime.fromisoformat(event["planned_for"]),
+                        event["discipline"],
+                        Jsonb(event["spec"]),
+                    ),
+                )
+                written.append(int(cur.fetchone()["id"]))
+        return {
+            "written": len(written),
+            "prescription_ids": written,
+            "note": "Recorded against the active block. They reach the calendar on the "
+            "next publish pass rather than immediately.",
         }
 
     if name == "get_calendar":
