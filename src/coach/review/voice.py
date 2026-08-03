@@ -23,12 +23,12 @@ cost the athlete his Sunday review.
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any
 
 import psycopg
 
 from coach.agent import persona
+from coach.agent import trust as trustmod
 from coach.llm import client as llmmod
 from coach.review.weekly import Review
 
@@ -53,9 +53,11 @@ MAX_CHARS = 2400
 # point would wave through the exact figure the trend module exists to withhold.
 # This was live for one commit and caught by running the guard against a rate
 # the claim ladder had already refused.
-FREE_INTEGER_MAX = 12
-
-_NUMBER = re.compile(r"\d+(?:[.,]\d+)?")
+#
+# The bar now lives in `agent.trust`, which the conversational scanner shares.
+# Re-exported here because this module is where the reasoning was paid for and
+# where a reader will look for it.
+FREE_INTEGER_MAX = trustmod.FREE_INTEGER_MAX
 
 
 TASK = """\
@@ -129,25 +131,23 @@ about what you changed.
 def _grounded(text: str, facts: str) -> bool:
     """Every substantial number in the reply came from the facts.
 
-    Substring rather than equality, and deliberately lenient in that direction:
-    "129 kg" against a fact sheet holding "129.1 kg" is the model rounding, which
-    is fine, while "131 kg" appears nowhere and is not. The failure this catches
-    is invention, not imprecision.
+    The policy is this module's and the arithmetic is `agent.trust`'s. The
+    review checks *every* number rather than only the physiological ones,
+    because it is assembled entirely in SQL and so there is no such thing as a
+    figure in it the facts did not supply. That is a stricter rule than the
+    conversational path applies and it stays stricter.
+
+    What moved is the part that must not drift: what counts as a match. This was
+    a substring test, which was lenient in the right direction by accident —
+    "129" is a substring of "129.1", which reads as the model rounding — and
+    also matched "29" inside "129". Rounding at the claim's own precision is the
+    same leniency stated on purpose, and it is shared with the scanner so that
+    a rewording of one cannot quietly loosen the other.
     """
-    for match in _NUMBER.findall(text):
-        if match in facts:
-            continue
-        # A comma decimal is a formatting choice, not a different number.
-        normalised = match.replace(",", ".")
-        if normalised in facts:
-            continue
-        # Whole numbers only. A decimal that is not in the facts is a claim the
-        # facts did not make, however small it is.
-        if "." not in normalised and int(normalised) <= FREE_INTEGER_MAX:
-            continue
-        log.warning("voiced review quoted %r, which is not in the facts", match)
-        return False
-    return True
+    loose = trustmod.ungrounded_numbers(text, facts)
+    for value in loose:
+        log.warning("voiced review quoted %r, which is not in the facts", value)
+    return not loose
 
 
 def check(text: str, facts: str) -> str | None:

@@ -65,6 +65,24 @@ def daily_spend_cap() -> Decimal:
     return cap
 
 
+def trust_enforced() -> bool:
+    """TRUST-07: is the trust scanner blocking, or only recording?
+
+    Default false, and that is the deliberate half of the decision. A scanner
+    tuned against invented examples has false positives a corpus built from real
+    transcripts has not met yet, and a false positive under enforcement costs
+    the athlete a legitimate answer with no way for him to know why. Shadow mode
+    gathers the evidence; `tests/fixtures/trust_corpus.py` is where it lands;
+    flipping this is the last step rather than the first.
+
+    Read per call rather than held, so enforcement can be turned off without a
+    deploy if it starts eating good replies. Anything other than a recognised
+    true value is false: a guard that fails open is the wrong direction, but so
+    is one that turns itself on because of a typo.
+    """
+    return os.environ.get("COACH_TRUST_ENFORCE", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def payload_retention_days() -> int:
     """OBS-14's window, read on its own for the same reason the cap is.
 

@@ -34,8 +34,9 @@
 | — | The outbox: proactive messages were sent and never recorded (PR #38) | merged |
 | P15 | The model call ledger: what was sent, what came back, readable (OBS-10 to OBS-14) | built |
 | — | `CLAUDE.md`, the resolved-debug directory, and the corrected zone tables | built |
+| P16 | The trust layer, in shadow (TRUST-01 to TRUST-08) | built |
 
-906 tests, all against a real Postgres. Schema is at migration 018; the
+944 tests, all against a real Postgres. Schema is at migration 019; the
 scheduler's own ledger is created on first use rather than as a migration,
 because it is process bookkeeping rather than part of the memory design.
 
@@ -140,6 +141,55 @@ Acceptance, when it is written:
   offset unadvanced for any turn that did not complete.
 - The three console scripts still exist and still work, because running one loop
   alone is how they are debugged.
+
+### P16: the trust layer, and why it is not enforcing yet
+
+TRUST-01 to TRUST-08. The largest gap `docs/prior-art.md` named: this repository
+states the trust model in `prompts/persona.md` and in the PRD, and nothing
+between the model's output and Telegram inspected what it had actually said.
+
+**It ships in shadow, and that is the decision rather than an unfinished
+edge.** `agent/trust.py` records every physiological figure the coach states
+with nothing behind it, and blocks none of them until `COACH_TRUST_ENFORCE` is
+set. The scanner is tuned against invented examples; a corpus built from real
+conversation has not existed until now, because until P15 there was no way to
+read a real conversation back. A false positive under enforcement costs the
+athlete a legitimate answer with no way for him to know why, which is how a
+guard gets switched off. The order is: run shadow, read the hits back through
+`coach-transcript`, add them to `tests/fixtures/trust_corpus.py`, then enforce.
+
+**The cheaper design.** `pacer-ai` reached this through a `ToolResult` type
+carrying value, unit, methodology and inputs on every computed value, which
+here would mean refactoring `blocks/load.py`, `health/trend.py` and
+`health/recovery.py`. It is not necessary: the question is what the model was
+*given* this turn, and that is already knowable from the assembled prompt and
+the tool results. Provenance on computed values stays available and unbuilt.
+
+**Three channels, deliberately not merged.** Tool and prompt figures; figures
+the athlete supplied himself; small whole numbers that are ordinary prose.
+`pacer-ai` shipped with one channel and an athlete saying "my LTHR is 165 bpm"
+made the bot fail three times and answer with nothing. Both are snapshotted
+before the model loop, so a retry cannot poison either, and so a tool result
+arriving later cannot be read as something the athlete said.
+
+**Two things are deliberately not checked, and they are written down.** A zone
+number is a label rather than a measurement — "ride Z2" is an honest
+prescription and requiring `2` to be attributed would fail every one of them —
+and percentages are left alone for now because adherence, compliance and
+intensity factors are all quoted as percentages and the false positive rate was
+not worth the coverage. A scanner whose gaps are undocumented reads as complete.
+
+**HLTH-09 did not move.** It would have been tidy to fold "never compare two
+body mass readings" behind the same gate, and it would have weakened it: that
+rule is enforced today through the naturalness retry, and putting it behind a
+shadow flag would have turned an enforced rule into a logged one. The trust
+scanner covers body mass figures additionally, through the `kg` unit.
+
+`review/voice.py` keeps its stricter policy — every number, not only the
+physiological ones, because the review is assembled entirely in SQL — and now
+expresses it over the same matching primitive. Two grounding implementations
+that can drift apart is how a rewording quietly loosens a gate, which is the
+failure the `trend.describe` split was built to avoid.
 
 ### P15: reading a turn back
 

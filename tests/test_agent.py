@@ -286,7 +286,10 @@ def test_editing_the_persona_changes_behaviour_without_a_deploy(tmp_path) -> Non
 
 
 def test_every_tool_has_a_schema() -> None:
-    assert len(tools.SCHEMAS) == 10  # P10 added set_break; get_plan reads the plan back
+    # P10 added set_break; get_plan reads the plan back; P16 added
+    # log_capability_gap, which is TRUST-05's named way out rather than a
+    # retrieval tool.
+    assert len(tools.SCHEMAS) == 11
     for schema in tools.SCHEMAS:
         assert schema["name"] and schema["description"]
         assert schema["input_schema"]["type"] == "object"

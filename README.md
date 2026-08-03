@@ -104,8 +104,9 @@ src/coach/
   agent/           P01: the conversation
     persona.py     the versioned system prompt (CHAT-02)
     prompt.py      per turn context assembly; what the coach is told, and when
-    tools.py       the eight tool surface and its dispatch (CHAT-06)
+    tools.py       the tool surface and its dispatch (CHAT-06), TRUST-05 and TRUST-06
     naturalness.py the behavioural checks: narration, questions, diagnosis, HLTH-09
+    trust.py       the coach may not state a figure nothing gave it (TRUST-01..07)
     interruptions.py  one interruption per conversation, claimed by priority (CHAT-11)
   llm/             model routing and accounting
     client.py      streaming, token accounting, cost per call (OBS-01)
