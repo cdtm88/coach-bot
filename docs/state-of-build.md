@@ -37,7 +37,7 @@
 | P16 | The trust layer, in shadow (TRUST-01 to TRUST-08) | built |
 | — | P09 wired, and the matching defect underneath it | built |
 
-956 tests, all against a real Postgres. Schema is at migration 019; the
+961 tests, all against a real Postgres. Schema is at migration 019; the
 scheduler's own ledger is created on first use rather than as a migration,
 because it is process bookkeeping rather than part of the memory design.
 
