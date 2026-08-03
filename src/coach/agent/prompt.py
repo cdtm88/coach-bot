@@ -142,7 +142,24 @@ def render_staleness(conn: psycopg.Connection, now: datetime) -> str:
         )
         stale = cur.fetchall()
     if not stale:
-        return ""
+        # Silence used to mean healthy, and silence is exactly what the coach
+        # filled in for itself. On 3 August 2026 it told the athlete "calendar
+        # and activities feeds have never returned successfully for this
+        # account" with all five stamped inside the hour, and consolidation
+        # wrote that into the rolling summary, where it was read back the next
+        # turn as established and said again.
+        #
+        # Worded narrowly on purpose. CHAT-09's whole point is that absence of
+        # data is not evidence of absence of activity, so this must not become
+        # "you have everything". It says the feeds answered, and forbids the one
+        # inference that was actually drawn.
+        return (
+            "FEEDS\n"
+            "Every feed has returned successfully inside its window. A feed that is "
+            "working and quiet is not a feed that is broken: if you hold no data on "
+            "something, look it up before saying you cannot see it, and never tell "
+            "him a sync is down without evidence from this block."
+        )
 
     lines = [
         "STALE FEEDS",

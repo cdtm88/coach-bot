@@ -731,3 +731,27 @@ def test_evidence_survives_into_the_fact(
         row = cur.fetchone()
     assert row is not None
     assert json.dumps(row["evidence"]) is not None and row["evidence"] == {"sessions": [77]}
+
+
+def test_the_instructions_refuse_the_coachs_claims_about_the_system() -> None:
+    """The loop that ran for a day on the live deployment.
+
+    The coach told the athlete the calendar and activity feeds had never
+    returned successfully; all five had answered inside the hour. Consolidation
+    read the conversation, wrote it into the rolling summary and two open
+    threads, and the next turn read it back as established and said it again.
+
+    Nothing in the instructions distinguished a claim about the athlete from a
+    claim about the system, and only one of those is what this pass is for.
+    """
+    text = propose.INSTRUCTIONS.lower()
+
+    assert "claims about the system are not evidence" in text
+    assert "open thread" in text
+    assert "the athlete saying his sync is broken is different" in text
+
+
+def test_the_instructions_refuse_to_record_a_retraction() -> None:
+    """A month of correctly ingested rides was marked unverified on the strength
+    of the coach apologising for a fabrication that had not happened."""
+    assert "retractions get the same treatment" in propose.INSTRUCTIONS.lower()
