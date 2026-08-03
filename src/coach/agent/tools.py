@@ -217,11 +217,30 @@ SCHEMAS: list[dict[str, Any]] = [
             "calendar and what he will actually do, so give it the same detail "
             "you would give him in a message: how long, how hard, and what it is "
             "for. A session with no duration and no purpose publishes as an empty "
-            "block on his calendar and is rejected."
+            "block on his calendar and is rejected.\n\n"
+            "To re-plan a period rather than add to it, set `replaces` to the "
+            "dates you are rewriting. Without it this only ever adds, so "
+            "re-planning a week that already has sessions in it leaves him "
+            "looking at both plans at once."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
+                "replaces": {
+                    "type": "object",
+                    "description": (
+                        "Withdraw what is still planned between these dates before "
+                        "writing the events below, as one operation. Sessions he has "
+                        "already done, missed, or that are suspended by a break are "
+                        "never touched. Use this whenever you are rewriting a week "
+                        "rather than adding to it."
+                    ),
+                    "properties": {
+                        "since": {"type": "string", "format": "date"},
+                        "until": {"type": "string", "format": "date"},
+                    },
+                    "required": ["since", "until"],
+                },
                 "events": {
                     "type": "array",
                     "items": {
@@ -278,7 +297,7 @@ SCHEMAS: list[dict[str, Any]] = [
                         },
                         "required": ["planned_for", "discipline", "spec"],
                     },
-                }
+                },
             },
             "required": ["events"],
         },
@@ -578,8 +597,29 @@ def dispatch(conn: psycopg.Connection, name: str, arguments: dict[str, Any]) -> 
                 "reason": "No sessions were written. Fix these and call again.",
             }
 
+        replaces = arguments.get("replaces")
+        withdrawn = 0
         written = []
         with conn.transaction(), conn.cursor() as cur:
+            if replaces:
+                # BLOCK-08's guard, and the same one `blocks.generate.rewrite_from`
+                # applies: a prescription with a session attached is history, and
+                # nothing already completed, missed or suspended is touched.
+                #
+                # In the same transaction as the insert, so a rejected write never
+                # leaves him with a week that was emptied and not refilled.
+                cur.execute(
+                    "delete from prescriptions where block_id = %s "
+                    "and (planned_for at time zone 'UTC')::date between %s and %s "
+                    "and session_id is null and status in ('planned', 'adjusted')",
+                    (
+                        block.id,
+                        date.fromisoformat(replaces["since"]),
+                        date.fromisoformat(replaces["until"]),
+                    ),
+                )
+                withdrawn = cur.rowcount
+
             for event in events:
                 discipline = eventmod.canonical(event["discipline"])
                 spec = dict(event["spec"])
@@ -602,9 +642,11 @@ def dispatch(conn: psycopg.Connection, name: str, arguments: dict[str, Any]) -> 
                 written.append(int(cur.fetchone()["id"]))
         return {
             "written": len(written),
+            "withdrawn": withdrawn,
             "prescription_ids": written,
             "note": "Recorded against the active block. They reach the calendar on the "
-            "next publish pass rather than immediately.",
+            "next publish pass rather than immediately, and anything withdrawn "
+            "loses its calendar entry on the nightly sweep.",
         }
 
     if name == "get_calendar":
