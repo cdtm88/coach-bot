@@ -40,6 +40,19 @@ RIDE: dict[str, Any] = {
 
 
 @pytest.fixture(autouse=True)
+def _zone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TZ-01's zone, set rather than inherited.
+
+    `_planned_at` stores a naive wall clock time in the *configured* zone, so
+    every assertion about a clock time in this file depends on what that zone
+    is. Reading it from the ambient environment passed on a development box
+    where COACH_TZ happened to be set and failed in CI where it is not — a test
+    that asserts on a timezone has to state the timezone.
+    """
+    monkeypatch.setenv("COACH_TZ", "Asia/Dubai")
+
+
+@pytest.fixture(autouse=True)
 def _block(conn: psycopg.Connection) -> None:
     block_id = conftest.ensure_block(conn)
     with conn.transaction(), conn.cursor() as cur:
