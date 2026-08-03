@@ -83,6 +83,13 @@ proxy. Use the `mcp__github__*` tools. This has cost time twice.
 `in_progress` for a run that finished an hour earlier. Pass `filter: latest` or
 re-request before concluding anything about CI.
 
+**Do not give a deployment instruction in its checkout form.** The console
+scripts live in the image's virtualenv and the data lives in the deployment, so
+`coach-transcript` on the host is `command not found` — which reads as a broken
+install rather than a command in the wrong place. There are also two compose
+projects on that box, and the database one answers `docker compose build`
+happily while building nothing. `docs/deploy-existing-postgres.md` has both.
+
 ## Verifying
 
 ```bash
