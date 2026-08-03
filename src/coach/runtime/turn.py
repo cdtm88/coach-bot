@@ -143,16 +143,10 @@ def respond(
 
     # TRUST-02. Snapshotted before the loop, so a retry cannot poison either
     # channel and so a tool result arriving later cannot be mistaken for
-    # something the athlete said. Only string content is read: after a tool
-    # round the history gains `role: user` entries carrying tool *results*, and
-    # counting those as self-reported would be the laundering path with extra
-    # steps.
-    attribution = trust.Attribution()
-    for block in system:
-        attribution.add_text(block.get("text", ""))
-    for message in history:
-        if message.get("role") == "user" and isinstance(message.get("content"), str):
-            attribution.add_self_reported(message["content"])
+    # something the athlete said. `coach-trust-audit` rebuilds this from the
+    # recorded payload by calling the same function, which is what makes an
+    # audit's false positive rate a statement about this scanner.
+    attribution = trust.attribution_for(system, history)
 
     try:
         models.check_spend(conn)

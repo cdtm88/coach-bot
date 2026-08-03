@@ -755,13 +755,14 @@ def test_the_ledger_records_what_happened(conn) -> None:
 def test_every_process_is_a_console_script() -> None:
     """The gap this package closed: `coach-ingest` was the only one.
 
-    Two entries here are not processes. `coach-transcript` is an operator
-    command, OBS-13's way into the call ledger; `coach-reconcile` is a one-off
-    for the matching defect and is expected to disappear once it has been run.
-    Both are in the same list because the reason for the list is that an entry
-    point nobody declared is an entry point nobody can run — and the image ships
-    `src` but not `scripts`, so a console script is the only way either of them
-    reaches the deployment at all.
+    Three entries here are not processes. `coach-transcript` is an operator
+    command, OBS-13's way into the call ledger; `coach-trust-audit` replays the
+    scanner over that ledger to earn TRUST-07's enforcement flag;
+    `coach-reconcile` is a one-off for the matching defect and is expected to
+    disappear once it has been run. All are in the same list because the reason
+    for the list is that an entry point nobody declared is an entry point nobody
+    can run — and the image ships `src` but not `scripts`, so a console script is
+    the only way any of them reaches the deployment at all.
     """
     import tomllib
     from pathlib import Path
@@ -776,6 +777,7 @@ def test_every_process_is_a_console_script() -> None:
         "coach-agent",
         "coach-scheduler",
         "coach-transcript",
+        "coach-trust-audit",
         "coach-reconcile",
     }
 

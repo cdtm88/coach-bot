@@ -41,6 +41,10 @@ coach-scheduler = "coach.runtime.scheduler:main"
 # OBS-13: read a model call back the way it happened. Not a process; the
 # operator's way into the OBS-10 ledger.
 coach-transcript = "coach.observe.transcript:main"
+# TRUST-07's gate: replay the scanner over the OBS-10 payloads to find out
+# whether it fires on the coach's real voice. Read-only, and the thing that has
+# to say zero before COACH_TRUST_ENFORCE is worth setting.
+coach-trust-audit = "coach.observe.trust_audit:main"
 # A one-off for the matching defect fixed on 3 August 2026, and a console script
 # rather than something under `scripts/` because the image does not ship that
 # directory and the data lives in the deployment. Deletable once it has been run.

@@ -67,13 +67,25 @@ _NUMBER_THEN_UNIT = re.compile(
     re.IGNORECASE,
 )
 # unit-then-number: "CTL 42", "FTP of 250", "LTHR 165"
+#
+# The trailing lookahead rejects a *decimal* continuation, not any full stop.
+# It was `(?![\w.])`, which also rejected the full stop that ends a sentence —
+# so "Your FTP is 250." was not a claim and "Your FTP is 250 now" was, and the
+# scanner's blind spot was the most natural way to write the sentence. Found on
+# 3 August 2026 while building `coach-trust-audit`, from a test that passed
+# because nothing had been flagged at all.
 _UNIT_THEN_NUMBER = re.compile(
-    rf"\b{_UNIT_BEFORE}\s*(?:of|is|at|was)?\s*(\d+(?:\.\d+)?)(?![\w.])",
+    rf"\b{_UNIT_BEFORE}\s*(?:of|is|at|was)?\s*(\d+(?:\.\d+)?)(?!\.?\d)(?!\w)",
     re.IGNORECASE,
 )
 
-# Any number at all, for the review's stricter policy.
-_ANY_NUMBER = re.compile(r"(?<![\w.])(\d+(?:[.,]\d+)?)(?![\w.])")
+# Any number at all, for the review's stricter policy and for reading the
+# grounded set out of prompt text. The same lookahead, and the same bug: a
+# prompt block ending "his FTP is 168." contributed *nothing*, so the figure the
+# coach was given was not in the set that permits it to say it. That direction
+# produces false positives, which is the direction that costs the athlete an
+# answer under enforcement.
+_ANY_NUMBER = re.compile(r"(?<![\w.])(\d+(?:[.,]\d+)?)(?![,.]?\d)(?!\w)")
 
 
 @dataclass
@@ -125,6 +137,34 @@ class Attribution:
             if round(value, decimals) == round(claim, decimals):
                 return True
         return False
+
+
+def attribution_for(system: list[dict[str, Any]], history: list[dict[str, Any]]) -> Attribution:
+    """TRUST-02's channels, from an assembled prompt and the history it opened with.
+
+    One implementation, called by the live turn and by `coach-trust-audit`'s
+    replay over recorded payloads. An audit that built the attribution set its
+    own way would be measuring a different scanner and reporting the answer as
+    though it were this one's — this repository has four instances of the same
+    thing decided twice, and every one of them drifted.
+
+    Tool results are not read here: they arrive during the loop and are added by
+    the caller as each round returns. What this covers is the part that is fixed
+    before the first call, which is why it can be snapshotted at all.
+
+    Only string content counts as self-reported. After a tool round the history
+    gains `role: user` entries carrying tool *results*, and a correction appended
+    by a retry is `role: user` too. Counting either as something the athlete said
+    is the laundering path with extra steps.
+    """
+    attribution = Attribution()
+    for block in system:
+        if isinstance(block, dict):
+            attribution.add_text(block.get("text", ""))
+    for message in history:
+        if message.get("role") == "user" and isinstance(message.get("content"), str):
+            attribution.add_self_reported(message["content"])
+    return attribution
 
 
 def _decimals(value: float) -> int:

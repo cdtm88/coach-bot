@@ -195,6 +195,67 @@ def test_unit_before_and_after_are_both_matched() -> None:
     assert [c.value for c in trust.claims_in("85 TSS")] == [85.0]
 
 
+# --- the sentence-final blind spot -------------------------------------------
+#
+# Every case above ends its number at a word boundary or the end of the string,
+# which is the one place the old lookahead worked. A full stop after the figure
+# is the most natural way to write any of these, and it made the claim invisible
+# in both directions.
+
+
+def test_a_claim_that_ends_a_sentence_is_still_a_claim() -> None:
+    """The scanner's blind spot: `(?![\\w.])` rejected the full stop too."""
+    assert [c.value for c in trust.claims_in("Your FTP is 250.")] == [250.0]
+    assert [c.value for c in trust.claims_in("Your CTL is 42.")] == [42.0]
+
+
+def test_a_grounded_figure_that_ends_a_sentence_still_grounds() -> None:
+    """The costlier half. A prompt block's own numbers must reach the set.
+
+    A figure the coach was handed and cannot then quote is a false positive,
+    which under enforcement costs the athlete a legitimate answer.
+    """
+    attribution = trust.Attribution()
+    attribution.add_text("His FTP is 168. Body mass 72.4.")
+
+    assert attribution.allows(168.0)
+    assert attribution.allows(72.4)
+
+
+def test_the_last_of_several_figures_is_not_dropped() -> None:
+    attribution = trust.Attribution()
+    attribution.add_text("CTL 42, ATL 51.")
+
+    assert attribution.grounded == [42.0, 51.0]
+
+
+def test_a_decimal_is_still_one_number_and_not_two() -> None:
+    """What the rejected full stop was there for, and still is."""
+    attribution = trust.Attribution()
+    attribution.add_text("ratio 1.25 today")
+
+    assert attribution.grounded == [1.25]
+    # Not 1 and 25. `allows(1.0)` is true here and correctly so: rounding at the
+    # claim's own precision is the documented rule, not a leak from this.
+    assert 25.0 not in attribution.grounded
+
+
+def test_a_version_string_is_still_not_a_number() -> None:
+    attribution = trust.Attribution()
+    attribution.add_text("v1.2.3 build")
+
+    assert attribution.grounded == []
+
+
+def test_a_claim_ending_a_sentence_is_caught_end_to_end() -> None:
+    """The whole point: it must reach `unattributed`, not merely match."""
+    attribution = trust.Attribution()
+    attribution.add_text("His FTP is 168 W.")
+
+    assert [c.value for c in trust.unattributed("Your FTP is 250.", attribution)] == [250.0]
+    assert trust.unattributed("Your FTP is 168.", attribution) == []
+
+
 # --- the review's stricter policy, over the same primitive ------------------
 
 
