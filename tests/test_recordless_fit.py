@@ -233,6 +233,33 @@ def test_a_scan_ingests_the_ride_and_skips_the_settings(
     assert len(archive.unreadable(conn)) == 1
 
 
+def test_the_poll_reports_how_many_files_it_cannot_read(
+    conn: psycopg.Connection, sandbox: Path
+) -> None:
+    """`archive.unreadable`'s caller on the live path.
+
+    The count belongs in `poll`'s result because that is where the operator
+    already looks, and because a file judged once is never logged again — a row
+    nothing reads is the same silence this whole change is about.
+    """
+    from coach.ingest import service
+    from ingest_harness import Upstream
+
+    def one_pass() -> dict:
+        return service.poll(conn, Upstream([], {}), DUBAI, service.no_review, lookback_days=3650)
+
+    assert one_pass()["unreadable_files"] == 0
+
+    drop(sandbox, "Settings.fit", build_recordless_fit(START, file_type="SETTINGS"))
+    result = one_pass()
+
+    assert result["unreadable_files"] == 1
+    # Standing, not per-pass: the file is judged once and skipped thereafter, so
+    # a count of what this pass discovered would drop back to zero and the fact
+    # would vanish from the only place it is reported.
+    assert one_pass()["unreadable_files"] == 1
+
+
 def test_the_file_is_still_archived_when_it_cannot_be_read(
     conn: psycopg.Connection, sandbox: Path
 ) -> None:

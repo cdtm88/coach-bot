@@ -38,7 +38,7 @@
 | — | P09 wired, and the matching defect underneath it | built |
 | — | A FIT file with no samples is an activity, not a non-event | built |
 
-997 tests, all against a real Postgres. Schema is at migration 020; the
+998 tests, all against a real Postgres. Schema is at migration 020; the
 scheduler's own ledger is created on first use rather than as a migration,
 because it is process bookkeeping rather than part of the memory design.
 

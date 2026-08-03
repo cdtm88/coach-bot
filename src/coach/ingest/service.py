@@ -362,6 +362,11 @@ def poll(
         "reviewed": reviews,
         "adjusted": adjusted,
         "deferred": deferred,
+        # Files in the permanent archive that yield no session. A standing count
+        # rather than this pass's, because that is the question worth asking:
+        # the log says it once and then never again, so without this the only
+        # record of a file nobody can read is a row nothing reads either.
+        "unreadable_files": len(archivemod.unreadable(conn)),
     }
 
 
