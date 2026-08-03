@@ -14,6 +14,7 @@ repository has now had four of.
 from __future__ import annotations
 
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -241,22 +242,72 @@ def test_a_run_that_replayed_nothing_is_not_reported_as_clean(
     assert "does not fire on the coach's ordinary voice" not in rendered
 
 
-def test_an_empty_payload_table_is_named_as_an_outage(conn: psycopg.Connection) -> None:
-    """Not "some payloads are missing" but "the ledger has recorded nothing".
+def _ledger_applied_at(conn: psycopg.Connection, moment: datetime) -> None:
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "update schema_migrations set applied_at = %s where filename = %s",
+            (moment, trust_audit.PAYLOAD_MIGRATION),
+        )
 
-    OBS-11 makes one missing payload a non-event by design. All of them is the
-    ledger not working, and `_record_payload` swallows its own exception, so the
-    report has to say where to look.
+
+def test_an_empty_ledger_with_no_calls_behind_it_is_not_an_outage(
+    conn: psycopg.Connection,
+) -> None:
+    """The deployment's real state, and the one the first version got wrong.
+
+    Every call predates the migration, so the ledger has recorded nothing
+    because it has had nothing to record. Telling the operator to go hunting
+    for a failing write is sending them after a fault that does not exist.
     """
+    record(conn, "Talked before the ledger shipped.", system=[{"text": "His FTP is 168 W."}])
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("delete from model_call_payloads")
+        cur.execute("update model_calls set created_at = now() - interval '2 days'")
+    _ledger_applied_at(conn, datetime.now(UTC))
+
+    rendered = trust_audit.render(audited(conn))
+
+    assert "nothing is wrong" in rendered.lower()
+    assert "nothing to record" in rendered
+    assert "Talk to the coach and run this again" in rendered
+    assert "could not record the payload" not in rendered, "no fault to hunt for"
+
+
+def test_an_empty_ledger_with_calls_behind_it_is_an_outage(conn: psycopg.Connection) -> None:
+    """The other side. Calls made *after* the ledger existed and no payloads.
+
+    OBS-11 makes one missing payload a non-event by design; all of them, after
+    the table existed, is the writer failing. `_record_payload` swallows its own
+    exception, so the report has to name the log line.
+    """
+    _ledger_applied_at(conn, datetime.now(UTC) - timedelta(days=2))
     record(conn, "Anything.", system=[{"text": "His FTP is 168 W."}])
     with conn.transaction(), conn.cursor() as cur:
         cur.execute("delete from model_call_payloads")
 
+    report = audited(conn)
+    rendered = trust_audit.render(report)
+
+    assert report.calls_since_ledger == 1
+    assert "not one wrote a payload" in rendered
+    assert "could not record the payload" in rendered, "must name the log line to grep"
+
+
+def test_an_unapplied_migration_says_so_rather_than_blaming_the_writer(
+    conn: psycopg.Connection,
+) -> None:
+    record(conn, "Anything.", system=[{"text": "His FTP is 168 W."}])
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("delete from model_call_payloads")
+        cur.execute(
+            "delete from schema_migrations where filename = %s", (trust_audit.PAYLOAD_MIGRATION,)
+        )
+
     rendered = trust_audit.render(audited(conn))
 
-    assert "recorded nothing at all" in rendered
-    assert "could not record the payload" in rendered, "must name the log line to grep"
-    assert "migration 018" in rendered
+    assert "has not been applied" in rendered
+    assert "Run the migrate service" in rendered
+    assert "could not record the payload" not in rendered
 
 
 def test_exchanges_older_than_the_ledger_are_explained_not_alarming(

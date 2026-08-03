@@ -62,6 +62,13 @@ NEAREST = 3
 # exactly like a percentage over four hundred.
 THIN_EVIDENCE = 30
 
+# The migration that created `model_call_payloads`. Named so an empty table can
+# be dated: a ledger with nothing in it because no conversation has happened
+# since it shipped is the expected state on the day it ships, and a ledger with
+# nothing in it after a week of talking is an outage. Those need opposite
+# responses and the table looks identical in both.
+PAYLOAD_MIGRATION = "018_call_ledger.sql"
+
 
 @dataclass
 class Hit:
@@ -99,6 +106,11 @@ class Report:
     skipped_first: Any = None
     skipped_last: Any = None
     ledger_from: Any = None
+    # When OBS-10's table was created, and how many calls have been made since.
+    # An empty ledger with no calls behind it has recorded nothing because there
+    # was nothing to record.
+    ledger_live_from: Any = None
+    calls_since_ledger: int = 0
 
     @property
     def rate(self) -> float:
@@ -169,6 +181,41 @@ def ledger_starts(conn: psycopg.Connection) -> Any:
         return (cur.fetchone() or {}).get("at")
 
 
+def ledger_live_from(conn: psycopg.Connection) -> Any:
+    """When `model_call_payloads` was created, from the migration that made it.
+
+    `schema_migrations.applied_at` is the only record of when this deployment
+    gained the ledger, and without it an empty table cannot be told from a
+    broken one.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "select applied_at from schema_migrations where filename = %s",
+            (PAYLOAD_MIGRATION,),
+        )
+        row = cur.fetchone()
+    return row["applied_at"] if row else None
+
+
+def calls_since(conn: psycopg.Connection, moment: Any, purpose: str | None = None) -> int:
+    """How many model calls have happened since the ledger existed.
+
+    Zero means the ledger has had nothing to record, which is the expected state
+    on the day it ships and is indistinguishable from an outage in the table
+    itself.
+    """
+    if moment is None:
+        return 0
+    clause = " and purpose = %s" if purpose else ""
+    params: list[Any] = [moment] + ([purpose] if purpose else [])
+    with conn.cursor() as cur:
+        cur.execute(
+            f"select count(*) as n from model_calls where created_at >= %s{clause}",
+            params,
+        )
+        return int((cur.fetchone() or {"n": 0})["n"])
+
+
 def audit(calls: list[transcript.Call], ledger_from: Any = None) -> Report:
     """Run the scanner over recorded exchanges as though each were live.
 
@@ -234,10 +281,30 @@ def _skipped_note(report: Report) -> str:
     head = f"{report.unreadable} exchange(s) had no recorded payload and were skipped{span}."
 
     if report.ledger_from is None:
+        # Three ways to have an empty payload table, and they need opposite
+        # responses. The first version of this offered only the two that are
+        # faults and told the deployment to go looking for an outage on the day
+        # the ledger shipped, when the true answer was that nobody had spoken to
+        # the coach since.
+        if report.ledger_live_from is None:
+            return (
+                f"{head}\n"
+                f"The payload table has no migration recorded ({PAYLOAD_MIGRATION} is "
+                "absent from schema_migrations), so OBS-10 has not been applied on this "
+                "deployment. Run the migrate service and try again."
+            )
+        if not report.calls_since_ledger:
+            return (
+                f"{head}\n"
+                f"The ledger has been in place since {report.ledger_live_from} and no "
+                "model calls have been made since. Nothing is wrong: it has had nothing "
+                "to record. Every exchange above predates it and cannot be recovered. "
+                "Talk to the coach and run this again."
+            )
         return (
             f"{head}\n"
-            "The payload table is empty: OBS-10 has recorded nothing at all. Either "
-            "migration 018 has not been applied on this deployment, or every payload "
+            f"{report.calls_since_ledger} call(s) have been made since the ledger was "
+            f"created at {report.ledger_live_from}, and not one wrote a payload. Every "
             "write is failing -- `_record_payload` swallows its exception by design, so "
             "check the process log for 'could not record the payload'. Until that is "
             "fixed there is nothing for this command to audit."
@@ -341,6 +408,8 @@ def main(argv: list[str] | None = None) -> int:
     with db.connect() as conn:
         calls = transcript.fetch(conn, last=args.last, on=args.on, purpose=args.purpose)
         report = audit(calls, ledger_from=ledger_starts(conn))
+        report.ledger_live_from = ledger_live_from(conn)
+        report.calls_since_ledger = calls_since(conn, report.ledger_live_from, args.purpose)
 
     print(render(report, quiet=args.quiet, full=args.full))
     return 0
@@ -348,7 +417,10 @@ def main(argv: list[str] | None = None) -> int:
 
 def audit_connection(conn: psycopg.Connection, **filters: Any) -> Report:
     """The whole pass against an open connection. For tests and for a REPL."""
-    return audit(transcript.fetch(conn, **filters), ledger_from=ledger_starts(conn))
+    report = audit(transcript.fetch(conn, **filters), ledger_from=ledger_starts(conn))
+    report.ledger_live_from = ledger_live_from(conn)
+    report.calls_since_ledger = calls_since(conn, report.ledger_live_from, filters.get("purpose"))
+    return report
 
 
 if __name__ == "__main__":  # pragma: no cover

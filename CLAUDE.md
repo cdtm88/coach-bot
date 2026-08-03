@@ -102,7 +102,7 @@ happily while building nothing. `docs/deploy-existing-postgres.md` has both.
 
 ```bash
 ./scripts/dev-db.sh start     # Postgres dies on container churn; this brings it back
-uv run pytest -q              # ~3 minutes, real Postgres, 1033 tests
+uv run pytest -q              # ~3 minutes, real Postgres, 1035 tests
 uv run ruff check . && uv run ruff format --check .
 ```
 
