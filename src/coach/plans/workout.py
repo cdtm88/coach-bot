@@ -41,8 +41,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from coach.science import zones as zonemod
+
 # Zone names the platform understands, so a step may say `z2` instead of a number.
-ZONES = frozenset({"z1", "z2", "z3", "z4", "z5", "z6", "z7"})
+# The same seven Coggan bands `coach.science.zones` holds the boundaries for, so
+# a name accepted here is a name that can be checked against a percentage below.
+ZONES = frozenset(zonemod.POWER_ZONE_NAMES)
 
 
 class UnpublishableStep(ValueError):
@@ -71,6 +75,63 @@ def duration(seconds: int) -> str:
     return f"{seconds}s"
 
 
+def _validated_zone(named: Any) -> str:
+    """A zone name the platform will understand, or the reason it will not.
+
+    One author for this message. It is reached from two directions — a step whose
+    only target is a zone, and a step that carries a zone *and* a number — and
+    the second was silently dropping an unrecognised name along with the rest of
+    the label, because `target` resolves the number first and returns.
+    """
+    zone = str(named).lower()
+    if zone not in ZONES:
+        raise UnpublishableStep(f"{named!r} is not one of {sorted(ZONES)}")
+    return zone
+
+
+def _reject_contradiction(step: dict[str, Any]) -> None:
+    """A step whose zone label disagrees with its own numbers is not publishable.
+
+    `target` below resolves the most specific form and returns, so a step
+    carrying both `zone: z2` and `power_pct: 95` publishes as 95 percent and the
+    zone is **silently dropped**. That is the same shape as the `- 3x` repeat
+    bug: two readings of one step, no error anywhere, and the athlete rides the
+    one nobody intended. There it cost two thirds of a session's duration; here
+    it would put a threshold effort on the calendar under an endurance label.
+
+    Checked against the Coggan boundaries in `coach.science.zones` rather than
+    against a number written here, so the corrected Z2 ceiling has one home.
+
+    Watts are not checked, and the reason is that converting them needs an FTP
+    this function is not given. Stated rather than silently skipped: a step
+    carrying both `zone` and `watts` is unverified here, and the zone is still
+    dropped by `target`'s precedence.
+    """
+    named = step.get("zone")
+    if named is None:
+        return
+
+    zone = _validated_zone(named)
+
+    fractions: list[float] = []
+    if "ramp_pct" in step:
+        low, high = step["ramp_pct"]
+        fractions = [float(low) / 100, float(high) / 100]
+    elif "power_pct" in step:
+        fractions = [float(step["power_pct"]) / 100]
+
+    band = zonemod.power_zone(zone)
+    outside = [f for f in fractions if not band.contains(f)]
+    if outside:
+        quoted = ", ".join(f"{f * 100:g}%" for f in outside)
+        raise UnpublishableStep(
+            f"step names {zone} ({band.label}) and {quoted} of FTP, which is not in "
+            f"that zone. {zone} is {band.lower * 100:g}% to "
+            f"{'above' if band.upper is None else f'{band.upper * 100:g}%'}. "
+            "Publishing would keep the number and drop the label."
+        )
+
+
 def target(step: dict[str, Any]) -> str:
     """The intensity half of a step line.
 
@@ -78,6 +139,7 @@ def target(step: dict[str, Any]) -> str:
     ramp also carries a `power_pct` pair and would otherwise render as its start
     value with the ramp silently dropped — a warmup that never warms up.
     """
+    _reject_contradiction(step)
     if "ramp_pct" in step:
         low, high = step["ramp_pct"]
         return f"ramp {int(low)}-{int(high)}%"
@@ -86,10 +148,7 @@ def target(step: dict[str, Any]) -> str:
     if "watts" in step:
         return f"{int(step['watts'])}W"
     if "zone" in step:
-        zone = str(step["zone"]).lower()
-        if zone not in ZONES:
-            raise UnpublishableStep(f"{step['zone']!r} is not one of {sorted(ZONES)}")
-        return zone
+        return _validated_zone(step["zone"])
     raise UnpublishableStep(
         f"step {step!r} carries no target. PLAN-09 wants duration *and* power on "
         "every step; a step with only a duration is free riding, which belongs in "

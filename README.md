@@ -170,6 +170,8 @@ src/coach/
     scheduler.py   the nightly process: consolidation, decay, export (coach-scheduler)
   observe/         P15: reading a model call back after the fact (OBS-10 to OBS-14)
     transcript.py  what was sent and what came back, as an exchange (coach-transcript)
+  science/         constants checked against a source once, so nobody checks twice
+    zones.py       Coggan power and heart rate bands; see docs/prior-art.md §2
 tests/             the acceptance criteria, as assertions
 ```
 

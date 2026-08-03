@@ -33,8 +33,9 @@
 | — | What three archived attempts were worth: `docs/prior-art.md` (PR #38) | merged |
 | — | The outbox: proactive messages were sent and never recorded (PR #38) | merged |
 | P15 | The model call ledger: what was sent, what came back, readable (OBS-10 to OBS-14) | built |
+| — | `CLAUDE.md`, the resolved-debug directory, and the corrected zone tables | built |
 
-888 tests, all against a real Postgres. Schema is at migration 018; the
+906 tests, all against a real Postgres. Schema is at migration 018; the
 scheduler's own ledger is created on first use rather than as a migration,
 because it is process bookkeeping rather than part of the memory design.
 
@@ -751,7 +752,10 @@ spec before acting.
 ## Where things live
 
 ```
+CLAUDE.md                what will otherwise waste an hour or ship a defect
 docs/prd.md              scope, requirements, acceptance, phase plan, open items
+docs/prior-art.md        what three archived attempts were worth
+docs/debug/resolved/     defects that took work to find, and what was eliminated
 docs/memory-design.md    memory tiers, schema, provenance, conflict matrix
 docs/setup.md            accounts, credentials, tunnel, the folder sync
 docs/intervals-api.md    what the API actually does, verified, with dates
