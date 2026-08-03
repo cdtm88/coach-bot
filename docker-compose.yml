@@ -39,6 +39,34 @@ x-app: &app
     COACH_TZ: ${COACH_TZ:?set COACH_TZ in .env, an IANA name like Asia/Dubai}
     TZ: ${TZ:-UTC}
     COACH_LOG_LEVEL: ${COACH_LOG_LEVEL:-INFO}
+    # MODEL-02: model and reasoning effort per purpose, from the environment
+    # rather than from code.
+    #
+    # Listed here because this file forwards nothing it does not name. There is
+    # no `env_file:`, so `${VAR}` is only ever substituted into a value declared
+    # in one of these blocks — putting MODEL_CHAT in .env and restarting changed
+    # nothing at all, and looked exactly like a setting that had been applied.
+    # The requirement said "configurable without a code change" and the code was
+    # not the thing standing in the way.
+    #
+    # Empty is the same as unset to the router: it falls back to the default in
+    # `coach.llm.router` rather than trying to route to "".
+    #
+    # In the shared anchor rather than per service because routing is decided
+    # per purpose in code, and which process ends up calling which purpose is
+    # not something a deployment file should be encoding a second opinion about.
+    MODEL_CHAT: ${MODEL_CHAT:-}
+    MODEL_CONSOLIDATION: ${MODEL_CONSOLIDATION:-}
+    MODEL_SESSION_REVIEW: ${MODEL_SESSION_REVIEW:-}
+    MODEL_TRANSCRIPTION: ${MODEL_TRANSCRIPTION:-}
+    MODEL_RECALL_TEST: ${MODEL_RECALL_TEST:-}
+    MODEL_REVIEW: ${MODEL_REVIEW:-}
+    EFFORT_CHAT: ${EFFORT_CHAT:-}
+    EFFORT_CONSOLIDATION: ${EFFORT_CONSOLIDATION:-}
+    EFFORT_SESSION_REVIEW: ${EFFORT_SESSION_REVIEW:-}
+    EFFORT_TRANSCRIPTION: ${EFFORT_TRANSCRIPTION:-}
+    EFFORT_RECALL_TEST: ${EFFORT_RECALL_TEST:-}
+    EFFORT_REVIEW: ${EFFORT_REVIEW:-}
   depends_on:
     postgres:
       condition: service_healthy

@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from coach import migrate
+from coach.llm import router
 from coach.runtime import transport
 
 TOKEN = "8225118233:AAExfPWg9QaI1nZByv3X7vKHEyDzeEwepsY"
@@ -111,3 +112,34 @@ def test_the_redactor_leaves_an_ordinary_url_alone(caplog: pytest.LogCaptureFixt
         )
 
     assert "intervals.icu/api/v1/athlete/i1/activities" in caplog.text
+
+
+def test_every_routable_purpose_can_be_configured_from_the_deployment() -> None:
+    """MODEL-02, which the code satisfied and the deployment did not.
+
+    `docker-compose.yml` has no `env_file:`, so it forwards nothing it does not
+    name: `${MODEL_CHAT}` is only substituted into a value that some
+    `environment:` block declares. Putting MODEL_CHAT in .env and restarting
+    therefore changed nothing, and looked precisely like a setting that had been
+    applied — the container came up, the coach replied, and it replied from the
+    default model.
+
+    A third failure in the family this file is for: correct code, installed in a
+    way that cannot reach it. The suite could not see it because the suite reads
+    the environment directly.
+
+    Asserted against `router.PURPOSES` rather than a list, so a purpose added
+    later fails here instead of being quietly unconfigurable in production. The
+    Sunday review's purpose was added without this and would have been the next
+    one to go missing.
+    """
+    compose = (Path(__file__).resolve().parents[1] / "docker-compose.yml").read_text()
+
+    missing = [
+        key
+        for purpose in router.PURPOSES
+        for key in (f"MODEL_{purpose.upper()}", f"EFFORT_{purpose.upper()}")
+        if f"{key}: ${{{key}" not in compose
+    ]
+
+    assert not missing, f"not passed through to the containers: {missing}"
