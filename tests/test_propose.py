@@ -374,6 +374,42 @@ def tool_provenance_enum() -> list[str]:
     return schema["properties"]["diffs"]["items"]["properties"]["provenance"]["enum"]
 
 
+def test_no_model_facing_schema_anywhere_offers_computed() -> None:
+    """The same rule, asserted across every door rather than at the one we knew.
+
+    The narrowing above was stated only in `propose`, and the in-turn tool
+    surface was left offering all four of MEM-04's values — a second way for a
+    model to propose a fact, with the guard applied to one of them. Nothing
+    carried that value through to a `facts` row, because an in-turn proposal is
+    briefing material for the nightly proposer and the proposer re-emits under
+    the narrow enum. It was still a schema describing a system that does not
+    exist, and the next door would have had it to copy.
+
+    Walking every schema rather than naming the two, so a ninth tool with a
+    provenance field is covered on the day it is written.
+    """
+    from coach.agent import tools as toolmod
+
+    def provenance_enums(node: object) -> list[list[str]]:
+        found: list[list[str]] = []
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "provenance" and isinstance(value, dict) and "enum" in value:
+                    found.append(value["enum"])
+                found.extend(provenance_enums(value))
+        elif isinstance(node, list):
+            for item in node:
+                found.extend(provenance_enums(item))
+        return found
+
+    enums = provenance_enums(toolmod.SCHEMAS) + provenance_enums(propose.tool_schema())
+
+    assert enums, "no provenance enum found; this test has stopped testing anything"
+    for enum in enums:
+        assert "computed" not in enum
+        assert set(enum) == set(conflict.MODEL_PROVENANCE)
+
+
 def test_narrowing_the_enum_does_not_mutate_the_pipeline_schema() -> None:
     """`DIFF_SCHEMA` is module state, and editing it in place would leak.
 

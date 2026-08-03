@@ -17,7 +17,7 @@ from psycopg.types.json import Jsonb
 
 import conftest
 from coach.health import breaks as breakmod
-from coach.notify import daily
+from coach.notify import daily, outbox
 from coach.runtime import scheduler
 
 TODAY = date(2026, 8, 3)
@@ -198,13 +198,15 @@ def test_the_follow_up_fires_once_not_repeatedly(conn: psycopg.Connection) -> No
     """NOTIF-02's acceptance, through the scheduler that actually enforces it.
 
     The ledger's (job, local_date) key is what makes "once" true, which is why
-    `follow_up` itself can be a pure function of the day.
+    `follow_up` itself can be a pure function of the day. The outbox's own
+    period key is the second guard and covers the case this one cannot; see
+    `test_outbox.py`.
     """
     prescribe(conn, TODAY)
     sent: list[str] = []
     jobs = {
         "follow_up": scheduler.Job(
-            run=daily.follow_up_job(sent.append),
+            run=daily.follow_up_job(outbox.Outbox(sent.append)),
             schedule=scheduler.Schedule(hour=21, covers="today"),
         )
     }
