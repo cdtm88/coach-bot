@@ -56,14 +56,28 @@ def match(conn: psycopg.Connection, session_id: int) -> int | None:
 
     Only unmatched prescriptions are eligible either way, so two rides on one day
     cannot both claim the same prescribed session.
+
+    A `data_unavailable` session matches nothing, which `missed` below already
+    states as the rule — "not missed, and not matched either: nothing here can
+    say whether it was the prescribed work" — and which this had no code for.
+    It was unreachable while only the upstream path set the flag, because a
+    placeholder has no type and so gets a discipline that matches nothing
+    anyway. FIT-14's watched folder does set it on a file that names its sport,
+    so without this guard a ride whose samples were lost would claim the day's
+    prescription and `attach` would freeze `completed: true` with no deltas
+    against it — indistinguishable from a session that hit its target.
     """
     with conn.cursor() as cur:
         cur.execute(
-            "select local_date, discipline, paired_event_id from sessions where id = %s",
+            "select local_date, discipline, paired_event_id, data_unavailable "
+            "  from sessions where id = %s",
             (session_id,),
         )
         session = cur.fetchone()
         if session is None:
+            return None
+        if session["data_unavailable"]:
+            log.debug("session %s carries no data; it can close no prescription", session_id)
             return None
 
         if session["paired_event_id"]:
