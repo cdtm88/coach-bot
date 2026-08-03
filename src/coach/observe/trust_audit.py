@@ -55,6 +55,13 @@ CONTEXT_CHARS = 140
 # defect from "said 250, nothing near it exists" -- not to dump the set.
 NEAREST = 3
 
+# Below this many replayed turns, a clean run is reported as thin rather than as
+# an answer. Roughly a week of conversation for one athlete. This is a judgement
+# about a result not being a fluke and not a statistical claim, and it is named
+# here rather than left to the reader because a percentage over four turns reads
+# exactly like a percentage over four hundred.
+THIN_EVIDENCE = 30
+
 
 @dataclass
 class Hit:
@@ -85,10 +92,24 @@ class Report:
     flagged: int = 0
     unreadable: int = 0
     hits: list[Hit] = field(default_factory=list)
+    # When the skipped exchanges happened, and when the ledger's earliest
+    # payload was written. Together these say whether a payload is missing
+    # because the call predates OBS-10 or because the write failed, which are
+    # a non-event and an outage and were previously indistinguishable.
+    skipped_first: Any = None
+    skipped_last: Any = None
+    ledger_from: Any = None
 
     @property
     def rate(self) -> float:
         return (self.flagged / self.turns) if self.turns else 0.0
+
+    @property
+    def predate_the_ledger(self) -> bool:
+        """Every skipped exchange is older than the oldest payload on record."""
+        if self.ledger_from is None or self.skipped_last is None:
+            return False
+        return self.skipped_last < self.ledger_from
 
 
 def _exchanges(calls: list[transcript.Call]) -> list[list[transcript.Call]]:
@@ -134,7 +155,21 @@ def _context(reply: str, claim: str) -> str:
     return reply[start : at + len(claim) + CONTEXT_CHARS // 2].replace("\n", " ")
 
 
-def audit(calls: list[transcript.Call]) -> Report:
+def ledger_starts(conn: psycopg.Connection) -> Any:
+    """When the earliest recorded payload's call happened, or None if there are none.
+
+    The one thing the audit cannot get from the calls it was handed: whether a
+    missing payload is a call that predates OBS-10 or a write that failed.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "select min(c.created_at) as at from model_call_payloads p "
+            "  join model_calls c on c.id = p.call_id"
+        )
+        return (cur.fetchone() or {}).get("at")
+
+
+def audit(calls: list[transcript.Call], ledger_from: Any = None) -> Report:
     """Run the scanner over recorded exchanges as though each were live.
 
     The first call of an exchange carries the history the turn opened with,
@@ -142,12 +177,15 @@ def audit(calls: list[transcript.Call]) -> Report:
     tool results appended since, and reading those as the athlete's own words
     is exactly what `attribution_for` refuses to do.
     """
-    report = Report()
+    report = Report(ledger_from=ledger_from)
 
     for exchange in _exchanges(calls):
         usable = [c for c in exchange if not c.missing_payload]
         if not usable:
             report.unreadable += 1
+            at = exchange[-1].created_at
+            report.skipped_first = min(filter(None, [report.skipped_first, at]), default=None)
+            report.skipped_last = max(filter(None, [report.skipped_last, at]), default=None)
             continue
 
         first, last = usable[0], usable[-1]
@@ -184,6 +222,41 @@ def audit(calls: list[transcript.Call]) -> Report:
     return report
 
 
+def _skipped_note(report: Report) -> str:
+    """Why exchanges were skipped, in the terms that decide what to do about it.
+
+    OBS-11 allows a cost row with no payload, so one is a non-event. All of them
+    is not, and the two were previously reported with the same sentence.
+    """
+    span = ""
+    if report.skipped_first is not None:
+        span = f", from {report.skipped_first} to {report.skipped_last}"
+    head = f"{report.unreadable} exchange(s) had no recorded payload and were skipped{span}."
+
+    if report.ledger_from is None:
+        return (
+            f"{head}\n"
+            "The payload table is empty: OBS-10 has recorded nothing at all. Either "
+            "migration 018 has not been applied on this deployment, or every payload "
+            "write is failing -- `_record_payload` swallows its exception by design, so "
+            "check the process log for 'could not record the payload'. Until that is "
+            "fixed there is nothing for this command to audit."
+        )
+    if report.predate_the_ledger:
+        return (
+            f"{head}\n"
+            f"All of them are older than the earliest payload on record ({report.ledger_from}), "
+            "so they are calls made before OBS-10 shipped rather than a fault. They cannot "
+            "be recovered; the ledger fills from that point onward."
+        )
+    return (
+        f"{head}\n"
+        f"The ledger has payloads from {report.ledger_from}, so these are not simply "
+        "calls that predate it. A payload write is failing for some calls and not "
+        "others; the process log records 'could not record the payload' for each."
+    )
+
+
 def render(report: Report, quiet: bool = False, full: bool = False) -> str:
     if not report.turns and not report.unreadable:
         return (
@@ -196,16 +269,38 @@ def render(report: Report, quiet: bool = False, full: bool = False) -> str:
         f"({report.rate:.1%}), {sum(1 for _ in report.hits)} claim(s) in total."
     ]
     if report.unreadable:
-        out.append(f"{report.unreadable} exchange(s) had no recorded payload and were skipped.")
+        out.append(_skipped_note(report))
+
+    # Nothing replayed is not a pass, and must never be printed as one. This
+    # said "nothing was flagged ... evidence the scanner does not fire on the
+    # coach's ordinary voice" after examining zero turns, which is the shape of
+    # every other defect found this week: an output that reads as a result.
+    if not report.turns:
+        out.append("")
+        out.append(
+            "Nothing was replayed, so this run says nothing about the scanner either "
+            "way. It is not a pass. TRUST-07's gate needs turns with payloads behind "
+            "them; fix the above and run it again."
+        )
+        return "\n".join(out)
 
     if not report.flagged:
         out.append("")
         out.append(
-            "Nothing was flagged. On a corpus this size that is evidence the scanner "
-            "does not fire on the coach's ordinary voice, which is what TRUST-07 asks "
-            "for before enforcement. It is not evidence that it catches a fabrication; "
-            "tests/fixtures/trust_corpus.py is the other half."
+            f"Nothing was flagged across {report.turns} turn(s). That is evidence the "
+            "scanner does not fire on the coach's ordinary voice, which is the half of "
+            "TRUST-07 this command can answer. It is not evidence that it catches a "
+            "fabrication; tests/fixtures/trust_corpus.py is the other half."
         )
+        if report.turns < THIN_EVIDENCE:
+            out.append("")
+            out.append(
+                f"{report.turns} turn(s) is a thin sample. {THIN_EVIDENCE} is the floor "
+                "this command will call unremarkable -- roughly a week of conversation "
+                "for one athlete -- and it is a judgement about not being a fluke, not a "
+                "statistical claim. Under that, a clean run is worth re-running later "
+                "rather than acting on."
+            )
         return "\n".join(out)
 
     if quiet:
@@ -245,14 +340,15 @@ def main(argv: list[str] | None = None) -> int:
 
     with db.connect() as conn:
         calls = transcript.fetch(conn, last=args.last, on=args.on, purpose=args.purpose)
+        report = audit(calls, ledger_from=ledger_starts(conn))
 
-    print(render(audit(calls), quiet=args.quiet, full=args.full))
+    print(render(report, quiet=args.quiet, full=args.full))
     return 0
 
 
 def audit_connection(conn: psycopg.Connection, **filters: Any) -> Report:
     """The whole pass against an open connection. For tests and for a REPL."""
-    return audit(transcript.fetch(conn, **filters))
+    return audit(transcript.fetch(conn, **filters), ledger_from=ledger_starts(conn))
 
 
 if __name__ == "__main__":  # pragma: no cover
