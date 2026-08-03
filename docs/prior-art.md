@@ -132,10 +132,19 @@ the real value, and guessed `"new_user"` and `"user_001"`, with the result that
 The rule is that a tool argument the server can derive must never come from the
 model. This repository's tool surface is mostly retrieval and proposal so the
 exposure is narrower, but `propose_fact` accepts a key and value from the model
-and `physiology.ftp_watts` is a writable key. That path is guarded by the
-consolidation conflict matrix rather than by nothing, which is the right shape,
-but it is worth confirming that a model-proposed physiology value cannot be
-ratified without an observation behind it.
+and `physiology.ftp_watts` is a writable key.
+
+*Confirmed on 3 August 2026, and one thing was open.* The path is guarded rather
+than bare: an in-turn proposal reaches `pending_writes` and never `facts`, and
+what the nightly proposer does with it is re-emit under its own schema. But
+`consolidation.propose` narrowed the provenance enum to exclude `computed` — the
+one value of MEM-04's four that `conflict.MEASURED` counts as a measurement —
+and `agent.tools.propose_fact` was still offering all four at the other door. No
+`computed` fact could actually be created that way, because the proposer's
+narrow enum stands between them. It was a schema describing a system that does
+not exist, which is how the next door gets built wrong. The constant now lives
+in `conflict` beside the rule that requires it, and a test walks every
+model-facing schema rather than the two that were known about.
 
 ## 2. Sports science worth porting rather than re-deriving
 
@@ -252,31 +261,55 @@ is the right call. The transferable half is the gap-fill: **any decaying metric
 needs a row on days when nothing happened, or it does not decay.** That applies
 directly to anything built on `blocks/load.py`.
 
-**Idempotent delivery, keyed on the period.** This is a verified gap here. There
-is no delivery ledger in `migrations/`, and `notify/daily.py` generates and sends
-without recording that it did. `runtime/scheduler.py` uses the date as an
-idempotency key for consolidation, which is the right instinct, but the two
-outbound messages a day do not have the equivalent.
+**Idempotent delivery, keyed on the period.** *Corrected on 3 August 2026, while
+building the fix. The claim first written here was wrong and is worth reading
+alongside what is actually true.*
 
-`training-tracker` hit this because its scheduler retried three times and the
-athlete got the same Saturday message three times. Its fix
-(`training_recommender.py:452`) is a `delivered_at` marker that generation
-resets when the period key changes and delivery sets, with delivery skipped when
-it is already set for the current period. In Postgres that is a `sent_messages`
-table with `UNIQUE (kind, period_key)` and an insert with `ON CONFLICT DO
-NOTHING` before the send, not after.
+What this said was that there is no delivery ledger and that the two outbound
+messages a day have no idempotency key. There is one and they do:
+`runtime/scheduler.run_due` calls `claim(conn, name, target)` for every job it
+runs, and `scheduled_runs` is keyed `primary key (job, local_date)`. The morning
+message, the evening follow-up and the Sunday review are all covered by it. The
+error came from reading `notify/daily.py`, which indeed records nothing, without
+following the job wrapper up into the scheduler that calls it.
 
-**Never deliver a stale artefact silently.** The same repository ran the
-generator and the deliverer as two separate scheduled jobs half an hour apart.
-If the generator failed, the deliverer would send last week's coaching advice as
-though it were current, which is the worst available failure for a coach. Its
-`AGENTS.md:91` requires comparing `generated_at` against today before sending
-and emitting a visible fallback otherwise. This repository's Sunday review and
-daily notifications have the same exposure and no such check.
+The residual exposure is real but much narrower than stated, and it is the gap
+between "the job ran" and "the message went out". `claim` re-claims a job whose
+status is `failed` while attempts remain, so a job that posted its message and
+then failed on a later line is run again and posts a second time. That is the
+case `training-tracker` actually hit — its scheduler retried three times and the
+athlete got the same Saturday message three times — and its fix
+(`training_recommender.py:452`) is a `delivered_at` marker set by delivery and
+reset when the period key changes.
 
-The deeper lesson is that two schedulers racing on shared state, with a hand
-tuned thirty minute safety margin documented as a guess, is the wrong shape.
-Generate and send in one transaction.
+Here that landed as `kind` and `period_key` columns on `messages` with a partial
+unique index, claimed before the post and released if the post throws, rather
+than as a separate `sent_messages` table. One row, so the conversation history
+and the record of what was sent cannot disagree about what the coach said.
+
+**The much larger thing this document missed.** `telegram.bot.record_reply` had
+exactly one caller, inside `bot.drain`, and the scheduler's sender went straight
+to the transport with no database write. So none of P10's three proactive
+messages was ever written to `messages` at all, and `runtime.turn._history`
+reads from `messages` — meaning the coach could offer at 21:00 to move
+Thursday's session and have no record of the offer when the athlete answered
+"yes, move it". Not a delivery-ledger problem; a memory problem wearing a
+delivery-ledger disguise, and the same shape as the plan the coach could write
+and never read (PR #35). Both are fixed by the same column.
+
+**Never deliver a stale artefact silently.** *Also corrected: this exposure does
+not exist here.* `training-tracker` ran the generator and the deliverer as two
+scheduled jobs half an hour apart, so a failed generator meant last week's
+advice was sent as though it were current. Its `AGENTS.md:91` requires comparing
+`generated_at` against today before sending. This repository does not have the
+shape that makes it possible: `morning_job`, `follow_up_job` and `review.run`
+each build and send inside one call, so there is no window in which a stale
+artefact could be picked up by a second job.
+
+The deeper lesson still holds and is why the check is unnecessary rather than
+missing: two schedulers racing on shared state, with a hand tuned thirty minute
+safety margin documented as a guess, is the wrong shape. Generate and send
+together.
 
 **A computed value carries its confidence, and consumers branch on the
 confidence rather than on `None`.** `pacer-ai` gates hard on this:

@@ -21,6 +21,7 @@ from coach import clock
 from coach.blocks import document as blockmod
 from coach.blocks import load as loadmod
 from coach.calendars import availability as calmod
+from coach.consolidation import conflict
 from coach.health import breaks as breakmod
 from coach.logbook import capture as capturemod
 from coach.memory import facts as factmod
@@ -80,9 +81,12 @@ SCHEMAS: list[dict[str, Any]] = [
             "properties": {
                 "key": {"type": "string"},
                 "value": {"description": "The new value, typed to match the key."},
+                # `computed` is absent on purpose and the list is not written out
+                # here, so this door and the nightly proposer's cannot drift
+                # apart. See `conflict.MODEL_PROVENANCE`.
                 "provenance": {
                     "type": "string",
-                    "enum": ["stated", "observed", "computed", "inferred"],
+                    "enum": list(conflict.MODEL_PROVENANCE),
                 },
                 "reason": {"type": "string", "description": "Why this change, in one line."},
             },

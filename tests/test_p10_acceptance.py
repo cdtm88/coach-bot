@@ -26,7 +26,7 @@ import conftest
 from coach.health import breaks as breakmod
 from coach.ingest import reconcile
 from coach.logbook import capture
-from coach.notify import charts, daily
+from coach.notify import charts, daily, outbox
 from coach.review import weekly
 from coach.runtime import scheduler
 
@@ -57,16 +57,23 @@ def prescribe(conn: psycopg.Connection, on: date, discipline: str = "ride") -> i
 
 
 def p10_jobs(sent: list[str]) -> dict[str, scheduler.Job]:
-    """The three jobs `scheduler.main` registers, built the same way."""
+    """The three jobs `scheduler.main` registers, built the same way.
+
+    Through an `Outbox`, because that is now what `main` hands them and the
+    whole value of this helper is that it is not a second way of building the
+    same thing. It also means these acceptance tests exercise the recording
+    path rather than only the sending one.
+    """
+    box = outbox.Outbox(sent.append)
     return {
-        "morning": scheduler.Job(
-            run=daily.morning_job(sent.append), schedule=scheduler.morning_schedule()
-        ),
+        "morning": scheduler.Job(run=daily.morning_job(box), schedule=scheduler.morning_schedule()),
         "follow_up": scheduler.Job(
-            run=daily.follow_up_job(sent.append), schedule=scheduler.follow_up_schedule()
+            run=daily.follow_up_job(box), schedule=scheduler.follow_up_schedule()
         ),
         "review": scheduler.Job(
-            run=lambda conn, on: weekly.run(conn, on, send=sent.append),
+            run=lambda conn, on: weekly.run(
+                conn, on, send=box.bind(conn, "review", on.isoformat())
+            ),
             schedule=scheduler.review_schedule(),
         ),
     }

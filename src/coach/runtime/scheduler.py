@@ -358,15 +358,21 @@ def _sweep_or_none(tz: Any) -> Callable[[psycopg.Connection, date], Any] | None:
         return None
 
 
-def _send_or_none() -> Callable[[str], None] | None:
-    """A one-argument sender bound to the allowlisted chat, or nothing.
+def _outbox_or_none() -> Any | None:
+    """The outbox bound to the allowlisted chat, or nothing.
 
     Constructed here for the same reason the sweep's client is: this process
     should still consolidate when the Telegram token is missing. A scheduler
     that refused to start because it could not send a good-morning message would
     take the nightly memory pass down with it.
+
+    An :class:`~coach.notify.outbox.Outbox` rather than a bare sender, because
+    every message this process emits has to be written to `messages` as well as
+    posted. A bare sender is what this returned before, and it is why none of
+    P10's three messages was ever in the coach's own history.
     """
     try:
+        from coach.notify import outbox as outboxmod
         from coach.runtime import transport
         from coach.telegram import bot as botmod
 
@@ -376,10 +382,7 @@ def _send_or_none() -> Callable[[str], None] | None:
         log.warning("P10 notifications not scheduled: %s", exc)
         return None
 
-    def send(text: str) -> None:
-        telegram.send(allowlist.chat_id, text)
-
-    return send
+    return outboxmod.Outbox(lambda text: telegram.send(allowlist.chat_id, text))
 
 
 def consolidation_job(
@@ -489,7 +492,7 @@ def main() -> None:
     # produced, and `voice.say` falls back to the assembled message on any
     # failure. So this is a better message when the model is reachable, not a
     # dependency on it being reachable.
-    send = _send_or_none()
+    box = _outbox_or_none()
 
     jobs: dict[str, Job | Callable[[psycopg.Connection, date], Any]] = {
         "consolidation": consolidate,
@@ -500,14 +503,19 @@ def main() -> None:
         "decay": decay_job,
         "export": export_job,
     }
-    if send is not None:
+    if box is not None:
         from coach.notify import daily as notifymod
         from coach.review import weekly as reviewmod
 
-        jobs["morning"] = Job(run=notifymod.morning_job(send), schedule=morning_schedule())
-        jobs["follow_up"] = Job(run=notifymod.follow_up_job(send), schedule=follow_up_schedule())
+        jobs["morning"] = Job(run=notifymod.morning_job(box), schedule=morning_schedule())
+        jobs["follow_up"] = Job(run=notifymod.follow_up_job(box), schedule=follow_up_schedule())
+        # `bind` rather than passing the outbox, so `weekly.run` keeps taking a
+        # plain one-argument sender and neither it nor its tests have to learn
+        # what a period key is. The Sunday it is about is the key.
         jobs["review"] = Job(
-            run=lambda conn, on: reviewmod.run(conn, on, send=send, client=client),
+            run=lambda conn, on: reviewmod.run(
+                conn, on, send=box.bind(conn, "review", on.isoformat()), client=client
+            ),
             schedule=review_schedule(),
         )
 

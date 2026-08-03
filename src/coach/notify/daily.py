@@ -152,30 +152,39 @@ def _deviation(conn: psycopg.Connection, day: date) -> float | None:
     return float(found.deviation)
 
 
-def morning_job(send: Any) -> Any:
-    """NOTIF-01 as a scheduler job. The ledger makes "once" the scheduler's problem."""
+def morning_job(outbox: Any) -> Any:
+    """NOTIF-01 as a scheduler job.
+
+    `outbox` is a :class:`coach.notify.outbox.Outbox`. It records the message as
+    something the coach said before it posts it, which is what puts the morning
+    message into the next turn's context — until it did, the coach named today's
+    session at 06:00 and could not see that it had.
+    """
 
     def job(conn: psycopg.Connection, on: date) -> str | None:
         message = morning(conn, on)
         if message:
-            send(message)
+            outbox.send(conn, message, kind="morning", period_key=on.isoformat())
         return message
 
     return job
 
 
-def follow_up_job(send: Any) -> Any:
+def follow_up_job(outbox: Any) -> Any:
     """NOTIF-02 as a scheduler job.
 
-    "Follow-up fires once, not repeatedly" is the ledger's `(job, local_date)`
-    key rather than anything here — which is why this can be a pure function of
-    the day and still satisfy a requirement about repetition.
+    "Follow-up fires once, not repeatedly" is now keyed twice, and the two keys
+    answer different questions. `scheduled_runs` decides whether the job runs;
+    the outbox's `(kind, period_key)` decides whether the message goes out. They
+    come apart in exactly one case, which is why both exist: a job that posted
+    and then failed is re-claimed by the scheduler while attempts remain, and
+    would otherwise ask the same question twice in one evening.
     """
 
     def job(conn: psycopg.Connection, on: date) -> str | None:
         message = follow_up(conn, on)
         if message:
-            send(message)
+            outbox.send(conn, message, kind="follow_up", period_key=on.isoformat())
         return message
 
     return job

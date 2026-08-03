@@ -30,8 +30,10 @@
 | — | Docker image, compose stack, MEM-12's pg_dump sidecar (PR #18) | merged |
 | — | libpq connection route, for a Postgres deployed separately (PR #19) | merged |
 | — | The four defects that only appear once deployed (PR #20) | merged |
+| — | What three archived attempts were worth: `docs/prior-art.md` (PR #38) | built |
+| — | The outbox: proactive messages were sent and never recorded (PR #38) | built |
 
-731 tests, all against a real Postgres. Schema is at migration 014; the
+866 tests, all against a real Postgres. Schema is at migration 017; the
 scheduler's own ledger is created on first use rather than as a migration,
 because it is process bookkeeping rather than part of the memory design.
 
@@ -365,6 +367,32 @@ a DST boundary cannot shift the window either.
 accepts an `on_text` callback, but the agent does not pass one — Telegram has no
 partial-message API worth the complexity, so the reply is sent whole. Revisit if
 PERF-01's p95 becomes a real complaint rather than a number.
+
+**P09 does not run.** Found on 3 August 2026 while tracing the outbound message
+paths, and it is the fourth instance of the failure this project keeps meeting:
+the phase is built, its tests pass, and nothing calls it.
+
+`adjust.pass_.run` is reached from exactly one place, `ingest.service.on_activity`,
+and only when its `adjust` flag is true. `adjust=True` appears nowhere in `src/`.
+Worse, `on_activity` itself has one caller in `src/` — `_handle_delivery`, on the
+webhook path, which is the path "How ingest actually works now" records as built,
+tested and **idle**. The primary path is the poll, which goes through
+`reconcile.run` and never calls `on_activity` at all. So ADJ-01 to ADJ-08 are
+unreachable twice over: the flag is never set, and the only caller that could set
+it is not running.
+
+`tests/test_adjust.py:894` asserts that the `adjust` parameter exists and defaults
+to False. That is a test that the switch is installed, not that anything turns it
+on, which is precisely the distinction `docs/prior-art.md` §5 records as
+pacer-ai's top retrospective lesson: name the real caller, not just the test.
+
+**It is deliberately still off.** Wiring it is not a defect fix — it starts a
+system autonomously reshaping the athlete's week from ride data, and that is a
+decision rather than a repair. Turning it on means choosing the path (the poll,
+not the dormant webhook), and giving `apply.execute` a sender, which now means an
+`Outbox` so an ADJ-06 notice reaches the coach's own history like every other
+thing it says. Until then the honest statement is that the asymmetry described
+below is designed and tested, and has never applied to a real session.
 
 ### One requirement built early, on purpose
 

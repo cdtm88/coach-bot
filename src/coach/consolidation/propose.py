@@ -36,7 +36,7 @@ from typing import Any
 import anthropic
 import psycopg
 
-from coach.consolidation import pipeline
+from coach.consolidation import conflict, pipeline
 from coach.llm import client as llmmod
 from coach.memory import keys as keymod
 
@@ -44,14 +44,15 @@ log = logging.getLogger(__name__)
 
 TOOL_NAME = "propose_diffs"
 
-# Provenance the model may claim. `computed` is the one value of MEM-04's four
-# that it must not: MEM-08 reserves computed figures for SQL, and
-# `conflict.MEASURED` treats computed as measured — so a model that labelled its
-# own arithmetic `computed` would get an inference promoted over a real
-# measurement. Narrowed here rather than in `pipeline.DIFF_SCHEMA` because the
-# pipeline's schema describes what a diff *is*; this describes what a model is
-# allowed to assert.
-MODEL_PROVENANCE = ("stated", "observed", "inferred")
+# Provenance the model may claim. Defined in `conflict`, beside the rule that
+# makes it necessary, because this is not the only door a model proposes through
+# — `agent.tools.propose_fact` is the other, and it was offering all four.
+# Re-exported here because this module's schema is where it is applied, and
+# because `propose.MODEL_PROVENANCE` is the name the tests already use.
+#
+# Narrowed here rather than in `pipeline.DIFF_SCHEMA` because the pipeline's
+# schema describes what a diff *is*; this describes what a model may assert.
+MODEL_PROVENANCE = conflict.MODEL_PROVENANCE
 
 # How much of the day to send. A day of messages is small; the cap is a
 # runaway guard for a pathological backlog, not a budget.
