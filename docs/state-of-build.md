@@ -30,10 +30,14 @@
 | — | Docker image, compose stack, MEM-12's pg_dump sidecar (PR #18) | merged |
 | — | libpq connection route, for a Postgres deployed separately (PR #19) | merged |
 | — | The four defects that only appear once deployed (PR #20) | merged |
-| — | What three archived attempts were worth: `docs/prior-art.md` (PR #38) | built |
-| — | The outbox: proactive messages were sent and never recorded (PR #38) | built |
+| — | What three archived attempts were worth: `docs/prior-art.md` (PR #38) | merged |
+| — | The outbox: proactive messages were sent and never recorded (PR #38) | merged |
+| P15 | The model call ledger: what was sent, what came back, readable (OBS-10 to OBS-14) | built |
+| — | `CLAUDE.md`, the resolved-debug directory, and the corrected zone tables | built |
+| P16 | The trust layer, in shadow (TRUST-01 to TRUST-08) | built |
+| — | P09 wired, and the matching defect underneath it | built |
 
-866 tests, all against a real Postgres. Schema is at migration 017; the
+956 tests, all against a real Postgres. Schema is at migration 019; the
 scheduler's own ledger is created on first use rather than as a migration,
 because it is process bookkeeping rather than part of the memory design.
 
@@ -138,6 +142,105 @@ Acceptance, when it is written:
   offset unadvanced for any turn that did not complete.
 - The three console scripts still exist and still work, because running one loop
   alone is how they are debugged.
+
+### P16: the trust layer, and why it is not enforcing yet
+
+TRUST-01 to TRUST-08. The largest gap `docs/prior-art.md` named: this repository
+states the trust model in `prompts/persona.md` and in the PRD, and nothing
+between the model's output and Telegram inspected what it had actually said.
+
+**It ships in shadow, and that is the decision rather than an unfinished
+edge.** `agent/trust.py` records every physiological figure the coach states
+with nothing behind it, and blocks none of them until `COACH_TRUST_ENFORCE` is
+set. The scanner is tuned against invented examples; a corpus built from real
+conversation has not existed until now, because until P15 there was no way to
+read a real conversation back. A false positive under enforcement costs the
+athlete a legitimate answer with no way for him to know why, which is how a
+guard gets switched off. The order is: run shadow, read the hits back through
+`coach-transcript`, add them to `tests/fixtures/trust_corpus.py`, then enforce.
+
+**The cheaper design.** `pacer-ai` reached this through a `ToolResult` type
+carrying value, unit, methodology and inputs on every computed value, which
+here would mean refactoring `blocks/load.py`, `health/trend.py` and
+`health/recovery.py`. It is not necessary: the question is what the model was
+*given* this turn, and that is already knowable from the assembled prompt and
+the tool results. Provenance on computed values stays available and unbuilt.
+
+**Three channels, deliberately not merged.** Tool and prompt figures; figures
+the athlete supplied himself; small whole numbers that are ordinary prose.
+`pacer-ai` shipped with one channel and an athlete saying "my LTHR is 165 bpm"
+made the bot fail three times and answer with nothing. Both are snapshotted
+before the model loop, so a retry cannot poison either, and so a tool result
+arriving later cannot be read as something the athlete said.
+
+**Two things are deliberately not checked, and they are written down.** A zone
+number is a label rather than a measurement — "ride Z2" is an honest
+prescription and requiring `2` to be attributed would fail every one of them —
+and percentages are left alone for now because adherence, compliance and
+intensity factors are all quoted as percentages and the false positive rate was
+not worth the coverage. A scanner whose gaps are undocumented reads as complete.
+
+**HLTH-09 did not move.** It would have been tidy to fold "never compare two
+body mass readings" behind the same gate, and it would have weakened it: that
+rule is enforced today through the naturalness retry, and putting it behind a
+shadow flag would have turned an enforced rule into a logged one. The trust
+scanner covers body mass figures additionally, through the `kg` unit.
+
+`review/voice.py` keeps its stricter policy — every number, not only the
+physiological ones, because the review is assembled entirely in SQL — and now
+expresses it over the same matching primitive. Two grounding implementations
+that can drift apart is how a rewording quietly loosens a gate, which is the
+failure the `trend.describe` split was built to avoid.
+
+### P15: reading a turn back
+
+OBS-10 to OBS-14, and built out of phase order on purpose. `model_calls` has
+recorded the shape of every call since P01 and none of its content, so "why did
+the coach say that" had no answer: the system prompt is assembled per turn from
+facts that change nightly and cannot be reconstructed afterwards, and the tool
+results that actually shaped a reply were never stored anywhere at all.
+
+**It cost no new call sites.** Everything hangs off `llm.client.complete`, which
+is already the only place a model is called, so consolidation, the session
+review and the Sunday voicing were covered without being touched. That is the
+same property that made OBS-01 true by construction rather than by discipline,
+used a second time.
+
+**Three decisions worth knowing without reading it.**
+
+`model_call_payloads` is a second table rather than columns on `model_calls`.
+The cost table is on the hot path — `runtime.models.spent_today` sums it before
+every turn — and widening a row scanned by a daily aggregate to carry tens of
+kilobytes of JSON would make the cheapest query in the system the dearest.
+Payloads are also the first thing anyone prunes, and pruning a column means
+rewriting the cost row rather than deleting a different one.
+
+**The payload write is outside the cost row's transaction, and swallows.** A
+call that happened must be billed whether or not a copy of it survived, so
+OBS-01 and OBS-07 cannot be made to depend on OBS-10 succeeding. A `model_calls`
+row with no payload is a normal outcome, and `coach-transcript` says so rather
+than printing an empty prompt — an unrecorded prompt and an empty one are
+different facts.
+
+**`turn_id` is what makes it readable.** One athlete message can produce three
+calls: ask for a tool, ask for another, answer. Before this they were three rows
+with adjacent timestamps and nothing joining them. `runtime.turn.respond` mints
+one because it is the boundary of an exchange, and the naturalness retry belongs
+to the same exchange as the reply it is retrying. Scheduled jobs get none: a job
+is a call and not a conversation, and inventing an id would have the ledger
+claim one that never happened.
+
+`coach-transcript` is the fifth console script and the point of the phase. A
+ledger that needs SQL across two tables and hand-decoded JSON is one nobody
+reads on the day it matters. `--last N` counts *exchanges* rather than rows, so
+a turn that used three tools does not eat the window and no reply is ever
+printed without the question above it.
+
+Retention resolves PRD open item 8, which had been open since the PRD was
+written: 90 days, then pruned nightly, configurable. `model_calls` is never
+pruned. A malformed window falls back to the default rather than being read as
+"prune everything", because a typo that silently emptied the ledger is not a
+failure mode worth having.
 
 ### P10: the coach speaks first
 
@@ -368,31 +471,41 @@ accepts an `on_text` callback, but the agent does not pass one — Telegram has 
 partial-message API worth the complexity, so the reply is sent whole. Revisit if
 PERF-01's p95 becomes a real complaint rather than a number.
 
-**P09 does not run.** Found on 3 August 2026 while tracing the outbound message
-paths, and it is the fourth instance of the failure this project keeps meeting:
-the phase is built, its tests pass, and nothing calls it.
+**P09 now runs, and fixing it uncovered something larger.** *Recorded 3 August
+2026: found while tracing the outbound message paths, wired the same day on the
+athlete's instruction.*
 
-`adjust.pass_.run` is reached from exactly one place, `ingest.service.on_activity`,
-and only when its `adjust` flag is true. `adjust=True` appears nowhere in `src/`.
-Worse, `on_activity` itself has one caller in `src/` — `_handle_delivery`, on the
-webhook path, which is the path "How ingest actually works now" records as built,
-tested and **idle**. The primary path is the poll, which goes through
-`reconcile.run` and never calls `on_activity` at all. So ADJ-01 to ADJ-08 are
-unreachable twice over: the flag is never set, and the only caller that could set
-it is not running.
+The original finding was the fourth instance of the failure this project keeps
+meeting. `adjust.pass_.run` is reached from one place, `ingest.service.on_activity`,
+and only when its `adjust` flag is true; `adjust=True` appeared nowhere in
+`src/`. `on_activity` itself had one caller — `_handle_delivery`, on the webhook
+path, which is built, tested and **idle**. So ADJ-01 to ADJ-08 were unreachable
+twice over.
 
-`tests/test_adjust.py:894` asserts that the `adjust` parameter exists and defaults
-to False. That is a test that the switch is installed, not that anything turns it
-on, which is precisely the distinction `docs/prior-art.md` §5 records as
-pacer-ai's top retrospective lesson: name the real caller, not just the test.
+**The larger thing was underneath it.** The live poll path did not call
+`on_activity` at all: it called `review.review` alone. `review.match` and
+`review.attach` had two callers in the whole of `src/`, one on the idle webhook
+path and one in `logbook.capture`. So **no ride ingested by the running
+deployment was ever matched to its prescription.** Sessions kept a null
+`prescription_id`, prescriptions stayed 'planned' indefinitely, compliance was
+never frozen, and every ADJ rule would have read a figure that did not exist.
 
-**It is deliberately still off.** Wiring it is not a defect fix — it starts a
-system autonomously reshaping the athlete's week from ride data, and that is a
-decision rather than a repair. Turning it on means choosing the path (the poll,
-not the dormant webhook), and giving `apply.execute` a sender, which now means an
-`Outbox` so an ADJ-06 notice reaches the coach's own history like every other
-thing it says. Until then the honest statement is that the asymmetry described
-below is designed and tested, and has never applied to a real session.
+The FIT-12 sweep is why this was invisible rather than loud. A prescription with
+a session on the same day is reported "unmatched rather than missed", so nothing
+was ever wrongly called a miss — it stayed open instead, which reads as a plan
+nobody is following rather than as a bug.
+
+The fix is one shared tail. `service.finish` does match, freeze, review and
+adjust in that order, and both ingest paths call it. Two call sites that must
+agree about the order of four operations is precisely the seam this project
+keeps finding defects in.
+
+`adjust=True` now appears exactly once in `src/`, in the thread `ingest.server.main`
+starts, and `tests/test_p09_wiring.py` asserts that it does — the half
+`tests/test_adjust.py:894` could never assert, since a test that the switch
+exists is not a test that anything turns it on. ADJ-06's notice goes through an
+`Outbox`, so a message telling the athlete his Thursday was shortened is
+recorded as something the coach said rather than vanishing into the transport.
 
 ### One requirement built early, on purpose
 
@@ -700,7 +813,10 @@ spec before acting.
 ## Where things live
 
 ```
+CLAUDE.md                what will otherwise waste an hour or ship a defect
 docs/prd.md              scope, requirements, acceptance, phase plan, open items
+docs/prior-art.md        what three archived attempts were worth
+docs/debug/resolved/     defects that took work to find, and what was eliminated
 docs/memory-design.md    memory tiers, schema, provenance, conflict matrix
 docs/setup.md            accounts, credentials, tunnel, the folder sync
 docs/intervals-api.md    what the API actually does, verified, with dates
@@ -718,6 +834,7 @@ src/coach/health/       P04 and P05: macros, body mass, recovery
 src/coach/calendars/    P06: the iCal feeds and observed availability
 src/coach/blocks/       P07: the constraint gate, the library, load, generation
 src/coach/plans/        P08: publishing upstream, the sweep, athlete edits
+src/coach/observe/      P15: reading a model call back. `coach-transcript`
 
 The README's layout section lists every module with one line on what it is for.
 ```

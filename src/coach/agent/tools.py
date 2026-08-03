@@ -11,6 +11,7 @@ the cache on every deploy.
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime
 from typing import Any
 
@@ -29,6 +30,8 @@ from coach.memory import notes as notemod
 from coach.memory import state as statemod
 from coach.plans import agenda as agendamod
 from coach.plans import events as eventmod
+
+log = logging.getLogger(__name__)
 
 # Phase that lands each deferred tool, surfaced in its unavailable result.
 DEFERRED: dict[str, str] = {}
@@ -91,6 +94,34 @@ SCHEMAS: list[dict[str, Any]] = [
                 "reason": {"type": "string", "description": "Why this change, in one line."},
             },
             "required": ["key", "value", "provenance", "reason"],
+        },
+    },
+    {
+        "name": "log_capability_gap",
+        "description": (
+            "Use this when he has asked for a physiological figure you do not have "
+            "and cannot get from another tool: an FTP nobody has tested, a TSS this "
+            "system does not compute, a weight trend the evidence does not yet "
+            "support. It records the gap and gives you a safe thing to say. Reach "
+            "for this rather than estimating: a plausible number he acts on is worse "
+            "than an honest gap, and this is the way to be honest about one."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "asked_for": {
+                    "type": "string",
+                    "description": "What he wanted to know, in your own words.",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "Why you cannot answer it. Recorded internally and never "
+                        "shown to him, so name the real reason."
+                    ),
+                },
+            },
+            "required": ["asked_for", "reason"],
         },
     },
     {
@@ -399,6 +430,29 @@ def _reject_specs(events: list[dict[str, Any]]) -> list[str]:
     return reasons
 
 
+# TRUST-06: arguments the server can derive, which the model must never supply.
+#
+# `docs/prior-art.md` section 1 records both halves of why. The model invented a
+# `user_id` it had no way to know, guessed `"new_user"`, and **no onboarding
+# profile was ever persisted in production**. And a value the model passes *in*
+# comes back *out* in the tool result, where a scanner that only guards outputs
+# would then treat it as attributed — inventing a number and laundering it
+# through a tool call it chose the arguments for.
+#
+# Stripped unconditionally rather than validated against the schema, because
+# Anthropic does not enforce `additionalProperties: false`: the model can emit a
+# key that was never declared, so there is no schema to check it against.
+SERVER_DERIVED = frozenset({"user_id", "athlete_id", "chat_id", "turn_id", "now", "today"})
+
+
+def _strip_server_derived(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Discard anything the server owns, and say so when it happens."""
+    supplied = SERVER_DERIVED & set(arguments)
+    if supplied:
+        log.warning("discarding server-derived argument(s) %s from %s", sorted(supplied), name)
+    return {k: v for k, v in arguments.items() if k not in SERVER_DERIVED}
+
+
 def dispatch(conn: psycopg.Connection, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Execute a tool call and return its result payload."""
     if name not in TOOL_NAMES:
@@ -406,6 +460,28 @@ def dispatch(conn: psycopg.Connection, name: str, arguments: dict[str, Any]) -> 
 
     if name in DEFERRED:
         return _unavailable(name)
+
+    arguments = _strip_server_derived(name, arguments)
+
+    if name == "log_capability_gap":
+        # TRUST-05. The reason goes to the database and the sentence goes to the
+        # coach; they are deliberately not the same string. A reply explaining
+        # which methodology was unavailable is a message about the system rather
+        # than about his training.
+        with conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                "insert into capability_gaps (asked_for, reason) values (%s, %s) returning id",
+                (arguments["asked_for"], arguments["reason"]),
+            )
+            gap_id = int(cur.fetchone()["id"])
+        return {
+            "recorded": True,
+            "gap_id": gap_id,
+            "say": (
+                "I do not have a figure for that yet, and I would rather tell you that "
+                "than guess at one."
+            ),
+        }
 
     if name == "get_context":
         # CHAT-07: active value, provenance, when it changed, what it replaced.

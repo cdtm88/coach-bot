@@ -38,6 +38,9 @@ coach-agent = "coach.runtime.agent:main"
 # The nightly process: decay, the fact export, and consolidation once a
 # proposer is wired. See docs/state-of-build.md.
 coach-scheduler = "coach.runtime.scheduler:main"
+# OBS-13: read a model call back the way it happened. Not a process; the
+# operator's way into the OBS-10 ledger.
+coach-transcript = "coach.observe.transcript:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -65,11 +65,29 @@ class FakeModel:
         self.replies = list(replies) or [FakeReply("Fine. How did the hip feel?")]
         self.calls: list[dict[str, Any]] = []
 
-    def __call__(self, client, purpose, system, messages, tools=None, conn=None, on_text=None):
+    def __call__(
+        self,
+        client,
+        purpose,
+        system,
+        messages,
+        tools=None,
+        conn=None,
+        on_text=None,
+        turn_id=None,
+    ):
         from coach.llm.client import Completion
 
         self.calls.append(
-            {"purpose": purpose, "system": system, "messages": list(messages), "tools": tools}
+            {
+                "purpose": purpose,
+                "system": system,
+                "messages": list(messages),
+                "tools": tools,
+                # OBS-12. Recorded rather than ignored, so the tests below can
+                # assert that every call of one exchange carries the same id.
+                "turn_id": turn_id,
+            }
         )
         reply = self.replies[min(len(self.calls) - 1, len(self.replies) - 1)]
         return Completion(
@@ -210,6 +228,25 @@ def test_a_narrating_reply_is_retried_once(conn, monkeypatch) -> None:
     assert result.violations == []
     assert result.reply == "Right, that changes Thursday."
     assert "CHAT-03" in fake.calls[1]["messages"][-1]["content"]
+
+
+def test_a_retry_belongs_to_the_same_exchange(conn, monkeypatch) -> None:
+    """OBS-12, on the path most likely to get it wrong.
+
+    The naturalness retry is a second model call for the same athlete message.
+    Reading the ledger back, it has to appear inside the turn it is retrying —
+    a retry filed as its own exchange is exactly the thing that would make a
+    transcript misleading, because it reads as the coach answering twice.
+    """
+    fake = use_model(
+        monkeypatch,
+        FakeReply("Noted. I've saved that to your profile."),
+        FakeReply("Right, that changes Thursday."),
+    )
+    result = turn.respond(conn, None, [{"body": "my knee hurts on the left"}], NOW, tz=DUBAI)
+
+    assert len(fake.calls) == 2
+    assert {c["turn_id"] for c in fake.calls} == {result.turn_id}
 
 
 def test_a_second_violation_is_sent_anyway_and_logged(conn, monkeypatch, caplog) -> None:
@@ -716,7 +753,13 @@ def test_the_ledger_records_what_happened(conn) -> None:
 
 
 def test_every_process_is_a_console_script() -> None:
-    """The gap this package closed: `coach-ingest` was the only one."""
+    """The gap this package closed: `coach-ingest` was the only one.
+
+    `coach-transcript` is the one entry here that is not a process. It is an
+    operator command, OBS-13's way into the call ledger, and it is in the same
+    list because the reason for the list is that an entry point nobody declared
+    is an entry point nobody can run.
+    """
     import tomllib
     from pathlib import Path
 
@@ -729,6 +772,7 @@ def test_every_process_is_a_console_script() -> None:
         "coach-ingest",
         "coach-agent",
         "coach-scheduler",
+        "coach-transcript",
     }
 
 
@@ -795,3 +839,113 @@ def test_the_publish_pass_is_registered_as_a_job() -> None:
 
     job = scheduler.publish_job(FakeApi(), DUBAI)
     assert callable(job)
+
+
+# --- TRUST-03 and TRUST-07: shadow, then enforcement ------------------------
+
+
+def test_an_invented_figure_is_recorded_but_not_blocked_by_default(conn, monkeypatch) -> None:
+    """Shadow mode. The scanner records and the athlete still gets his reply.
+
+    A regex tuned against invented examples has false positives a corpus built
+    from real transcripts has not met yet, and a false positive under
+    enforcement costs a legitimate answer with no way for him to know why.
+    """
+    monkeypatch.delenv("COACH_TRUST_ENFORCE", raising=False)
+    use_model(monkeypatch, FakeReply("Your FTP is 250 watts, so hold 180 on Thursday."))
+
+    result = turn.respond(conn, None, [{"body": "what should I hold?"}], NOW, tz=DUBAI)
+
+    assert result.unattributed
+    assert result.trust_enforced is False
+    assert result.reply.startswith("Your FTP is 250 watts")
+
+
+def test_under_enforcement_an_invented_figure_is_retried(conn, monkeypatch) -> None:
+    monkeypatch.setenv("COACH_TRUST_ENFORCE", "1")
+    fake = use_model(
+        monkeypatch,
+        FakeReply("Your FTP is 250 watts, so hold 180 on Thursday."),
+        FakeReply("I do not have a tested FTP for you yet. Ride Thursday by feel."),
+    )
+
+    result = turn.respond(conn, None, [{"body": "what should I hold?"}], NOW, tz=DUBAI)
+
+    assert result.trust_enforced is True
+    assert result.unattributed == []
+    assert result.reply.startswith("I do not have a tested FTP")
+    # The correction names the figures and the way out, rather than the fix.
+    correction = fake.calls[1]["messages"][-1]["content"]
+    assert "250 watts" in correction
+    assert "call a tool" in correction
+
+
+def test_a_second_invented_figure_substitutes_a_fallback_rather_than_silence(
+    conn, monkeypatch
+) -> None:
+    """The one place this diverges from the naturalness posture above.
+
+    A clumsy sentence is sent anyway; a fabricated FTP is not, because he would
+    ride it. What replaces it is a fallback and not a silence, for the same
+    reason OBS-07 refuses to go quiet.
+    """
+    monkeypatch.setenv("COACH_TRUST_ENFORCE", "1")
+    use_model(
+        monkeypatch,
+        FakeReply("Your FTP is 250 watts."),
+        FakeReply("Sorry. Your FTP is 249 watts."),
+    )
+
+    result = turn.respond(conn, None, [{"body": "what is my ftp?"}], NOW, tz=DUBAI)
+
+    assert result.reply == turn.UNGROUNDED_REPLY
+    assert result.unattributed
+
+
+def test_a_figure_a_tool_returned_is_not_a_violation(conn, monkeypatch) -> None:
+    """The attribution accumulates across tool rounds, so a figure from the
+    second round grounds a reply written after it."""
+    monkeypatch.setenv("COACH_TRUST_ENFORCE", "1")
+    use_model(
+        monkeypatch,
+        FakeReply(tool_uses=[FakeUse("get_plan", {"since": "2026-07-28", "until": "2026-08-03"})]),
+        FakeReply("Nothing prescribed this week, so nothing to hold."),
+    )
+
+    result = turn.respond(conn, None, [{"body": "what is on?"}], NOW, tz=DUBAI)
+
+    assert result.unattributed == []
+    assert "get_plan" in result.tool_calls
+
+
+def test_a_figure_the_athlete_supplied_is_his_to_repeat(conn, monkeypatch) -> None:
+    """`pacer-ai` shipped without this channel and a self-reported LTHR made the
+    bot fail three times and answer with nothing."""
+    monkeypatch.setenv("COACH_TRUST_ENFORCE", "1")
+    message(conn, "my LTHR is 165 bpm")
+    use_model(monkeypatch, FakeReply("Working from an LTHR of 165 for now."))
+
+    result = turn.respond(conn, None, [{"body": "my LTHR is 165 bpm"}], NOW, tz=DUBAI)
+
+    assert result.unattributed == []
+    assert result.reply.startswith("Working from an LTHR")
+
+
+def test_a_tool_result_cannot_be_read_as_something_the_athlete_said(conn, monkeypatch) -> None:
+    """The self-reported channel is snapshotted before the loop.
+
+    After a tool round the history gains `role: user` entries carrying tool
+    *results*. Counting those as self-reported would be the laundering path with
+    extra steps, so the snapshot is taken once and never refreshed.
+    """
+    monkeypatch.setenv("COACH_TRUST_ENFORCE", "1")
+    use_model(
+        monkeypatch,
+        FakeReply(tool_uses=[FakeUse("get_plan", {"since": "2026-07-28", "until": "2026-08-03"})]),
+        FakeReply("Your FTP is 250 watts."),
+        FakeReply("I do not have an FTP for you."),
+    )
+
+    result = turn.respond(conn, None, [{"body": "what is on?"}], NOW, tz=DUBAI)
+
+    assert result.reply.startswith("I do not have an FTP")

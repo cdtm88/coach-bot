@@ -30,6 +30,7 @@ turn ends with what it has rather than continuing.
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -38,8 +39,8 @@ from typing import Any
 import anthropic
 import psycopg
 
-from coach import clock
-from coach.agent import interruptions, naturalness, prompt, tools
+from coach import clock, config
+from coach.agent import interruptions, naturalness, prompt, tools, trust
 from coach.health import bodymass
 from coach.llm import client as llmmod
 from coach.runtime import models
@@ -58,6 +59,16 @@ CAPPED_REPLY = (
     "Nothing is broken and nothing is lost, and I will pick this up tomorrow."
 )
 
+# TRUST-07, under enforcement only. A reply that still quotes a figure nothing
+# supports after a retry is discarded, and this goes instead. It is a fallback
+# and not a silence: OBS-07's reasoning applies here too, and a coach that says
+# nothing is a worse failure than one that says it cannot answer yet.
+UNGROUNDED_REPLY = (
+    "I do not have a number I trust for that yet, so I would rather not guess at one. "
+    "Ask me again once the next ride has landed and I will have something real to work "
+    "from."
+)
+
 
 @dataclass
 class Turn:
@@ -70,6 +81,15 @@ class Turn:
     retried: bool = False
     capped: bool = False
     context_tokens: int = 0
+    # TRUST-03. Physiological figures the reply stated that nothing in the turn
+    # accounts for. Populated in shadow mode as well as under enforcement, which
+    # is the whole point of shadow mode.
+    unattributed: list[str] = field(default_factory=list)
+    trust_enforced: bool = False
+    # OBS-12. Minted here because this function is the boundary of an exchange:
+    # every model call it causes, including the tool rounds and the naturalness
+    # retry, belongs to the one message the athlete sent.
+    turn_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 
 def candidates(conn: psycopg.Connection, today: date) -> list[interruptions.Candidate]:
@@ -121,6 +141,19 @@ def respond(
 
     history = _history(conn, messages, is_catch_up)
 
+    # TRUST-02. Snapshotted before the loop, so a retry cannot poison either
+    # channel and so a tool result arriving later cannot be mistaken for
+    # something the athlete said. Only string content is read: after a tool
+    # round the history gains `role: user` entries carrying tool *results*, and
+    # counting those as self-reported would be the laundering path with extra
+    # steps.
+    attribution = trust.Attribution()
+    for block in system:
+        attribution.add_text(block.get("text", ""))
+    for message in history:
+        if message.get("role") == "user" and isinstance(message.get("content"), str):
+            attribution.add_self_reported(message["content"])
+
     try:
         models.check_spend(conn)
     except models.SpendCapReached as exc:
@@ -131,7 +164,9 @@ def respond(
         turn.reply = CAPPED_REPLY
         return turn
 
-    turn.reply = _converse(conn, client, system, history, turn, on_text)
+    turn.reply = _converse(conn, client, system, history, turn, on_text, attribution)
+
+    _check_trust(conn, client, system, history, turn, on_text, attribution)
 
     turn.violations = naturalness.violations(turn.reply)
     if turn.violations:
@@ -151,6 +186,80 @@ def respond(
     return turn
 
 
+def _check_trust(
+    conn: psycopg.Connection,
+    client: anthropic.Anthropic,
+    system: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+    turn: Turn,
+    on_text: Callable[[str], None] | None,
+    attribution: trust.Attribution,
+) -> None:
+    """TRUST-03 and TRUST-07: did the reply state a figure nothing supports?
+
+    **Shadow by default.** The scanner records and blocks nothing until
+    `COACH_TRUST_ENFORCE` is set. A regex tuned against invented examples will
+    have false positives that a corpus built from real transcripts has not seen
+    yet, and a false positive under enforcement costs the athlete a legitimate
+    answer with no way for him to know why. Shadow mode is how the corpus gets
+    the evidence to earn enforcement, and `coach-transcript` is how it is read.
+
+    **Under enforcement it retries once, then substitutes.** This is the one
+    place the turn deliberately diverges from the naturalness posture above,
+    which sends a clumsy sentence rather than nothing. A fabricated FTP is not a
+    clumsy sentence: he would ride it. So the second failure discards the reply
+    and sends :data:`UNGROUNDED_REPLY`, which is a fallback rather than a
+    silence.
+    """
+    loose = trust.unattributed(turn.reply, attribution)
+    if not loose:
+        return
+
+    turn.unattributed = [c.text for c in loose]
+    enforcing = config.trust_enforced()
+    turn.trust_enforced = enforcing
+
+    if not enforcing:
+        # Recorded, not blocked. The OBS-10 payload for this turn holds the
+        # prompt and the tool results, so a hit here is a complete case for the
+        # corpus without anyone reproducing anything.
+        log.warning("TRUST (shadow): reply quoted %s with nothing behind it", turn.unattributed)
+        return
+
+    log.warning("TRUST: reply quoted %s with nothing behind it; retrying once", turn.unattributed)
+    history.append({"role": "assistant", "content": turn.reply})
+    history.append({"role": "user", "content": _trust_correction(loose)})
+    retried = _converse(conn, client, system, history, turn, on_text, attribution)
+
+    still = trust.unattributed(retried, attribution)
+    if not still:
+        turn.reply, turn.unattributed = retried, []
+        return
+
+    log.error(
+        "TRUST: reply still quoted %s after a retry; substituting the fallback",
+        [c.text for c in still],
+    )
+    turn.reply = UNGROUNDED_REPLY
+    turn.unattributed = [c.text for c in still]
+
+
+def _trust_correction(loose: list[trust.Claim]) -> str:
+    """Names the figures rather than the fix.
+
+    And names the way out. `docs/prior-art.md` section 1: a bare prohibition
+    with no alternative is what pushes a model into inventing something, so this
+    says what to do instead of quoting a number it does not have.
+    """
+    quoted = ", ".join(repr(c.text) for c in loose)
+    return (
+        f"That reply stated {quoted}, and nothing you were given this turn contains "
+        "those figures. Do not repeat them. Say the same thing without the numbers, "
+        "or call a tool that would give you real ones, or say plainly that you do not "
+        "have that figure yet. Do not apologise for the correction or refer to it."
+    )
+
+
 def _converse(
     conn: psycopg.Connection,
     client: anthropic.Anthropic,
@@ -158,6 +267,7 @@ def _converse(
     history: list[dict[str, Any]],
     turn: Turn,
     on_text: Callable[[str], None] | None,
+    attribution: trust.Attribution | None = None,
 ) -> str:
     """Call the model, run whatever tools it asks for, and return the text."""
     for _ in range(MAX_TOOL_ROUNDS):
@@ -169,6 +279,7 @@ def _converse(
             tools=tools.SCHEMAS,
             conn=conn,
             on_text=on_text,
+            turn_id=turn.turn_id,
         )
         if not completion.tool_uses:
             return completion.text
@@ -177,11 +288,18 @@ def _converse(
         results = []
         for use in completion.tool_uses:
             turn.tool_calls.append(use.name)
+            payload = _dispatch(conn, use)
+            # TRUST-02: a figure a tool actually returned is one the coach may
+            # quote. Accumulated as the round trips happen rather than gathered
+            # afterwards, because a later round's result must ground a figure
+            # the reply states, and an earlier round's must too.
+            if attribution is not None:
+                attribution.add_tool_result(payload)
             results.append(
                 {
                     "type": "tool_result",
                     "tool_use_id": use.id,
-                    "content": _dispatch(conn, use),
+                    "content": payload,
                 }
             )
         history.append({"role": "user", "content": results})

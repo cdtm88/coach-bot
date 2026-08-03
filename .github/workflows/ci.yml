@@ -75,12 +75,13 @@ jobs:
         run: |
           docker run --rm coach-bot:ci python -c "
           import coach.migrate, coach.seed, coach.ingest.server
-          import coach.runtime.agent, coach.runtime.scheduler"
+          import coach.runtime.agent, coach.runtime.scheduler
+          import coach.observe.transcript"
 
       - name: Every entry point resolves
         run: |
           docker run --rm coach-bot:ci sh -c '
-            for exe in coach-migrate coach-seed coach-ingest coach-agent coach-scheduler; do
+            for exe in coach-migrate coach-seed coach-ingest coach-agent coach-scheduler coach-transcript; do
               command -v "$exe" >/dev/null || { echo "missing: $exe"; exit 1; }
             done'
 

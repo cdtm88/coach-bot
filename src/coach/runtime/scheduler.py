@@ -33,7 +33,7 @@ from typing import Any
 
 import psycopg
 
-from coach import clock, db
+from coach import clock, config, db
 from coach.memory import export as exportmod
 from coach.memory import facts as factmod
 
@@ -260,6 +260,30 @@ def decay_job(conn: psycopg.Connection, _on: date) -> None:
     """
     changed = factmod.apply_decay(conn)
     log.info("decayed %d facts", changed)
+
+
+def prune_payloads_job(conn: psycopg.Connection, _on: date) -> None:
+    """OBS-14: raw prompts and replies age out; the cost rows do not.
+
+    `model_calls` is never touched. OBS-01's "daily cost is queryable by
+    purpose" is a claim about the whole history, and a retention policy that
+    quietly truncated it would answer a different question every quarter. What
+    ages out is `model_call_payloads`, which is the debugging copy.
+
+    Deleting on the payload's own `created_at` rather than joining back to the
+    call's. They are within milliseconds of each other, the payload table has
+    the index, and a join here would read every call row every night to
+    rediscover a date it already has.
+    """
+    days = config.payload_retention_days()
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "delete from model_call_payloads where created_at < now() - make_interval(days => %s)",
+            (days,),
+        )
+        removed = cur.rowcount
+    if removed:
+        log.info("pruned %d model call payload(s) older than %d days", removed, days)
 
 
 def export_job(conn: psycopg.Connection, _on: date) -> None:
@@ -501,6 +525,10 @@ def main() -> None:
         **({"publish": publish} if publish else {}),
         **({"sweep": sweep} if sweep else {}),
         "decay": decay_job,
+        # Before the export so the night's last act is still writing the file a
+        # person reads. Its cost is one indexed delete on most nights and none
+        # at all until the ledger is ninety days old.
+        "prune_payloads": prune_payloads_job,
         "export": export_job,
     }
     if box is not None:
