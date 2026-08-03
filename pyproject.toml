@@ -41,6 +41,10 @@ coach-scheduler = "coach.runtime.scheduler:main"
 # OBS-13: read a model call back the way it happened. Not a process; the
 # operator's way into the OBS-10 ledger.
 coach-transcript = "coach.observe.transcript:main"
+# A one-off for the matching defect fixed on 3 August 2026, and a console script
+# rather than something under `scripts/` because the image does not ship that
+# directory and the data lives in the deployment. Deletable once it has been run.
+coach-reconcile = "coach.ingest.backfill:main"
 
 [build-system]
 requires = ["hatchling"]

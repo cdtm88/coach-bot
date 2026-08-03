@@ -87,7 +87,7 @@ re-request before concluding anything about CI.
 
 ```bash
 ./scripts/dev-db.sh start     # Postgres dies on container churn; this brings it back
-uv run pytest -q              # ~3 minutes, real Postgres, 961 tests
+uv run pytest -q              # ~3 minutes, real Postgres, 979 tests
 uv run ruff check . && uv run ruff format --check .
 ```
 

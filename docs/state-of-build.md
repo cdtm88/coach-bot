@@ -37,7 +37,7 @@
 | P16 | The trust layer, in shadow (TRUST-01 to TRUST-08) | built |
 | — | P09 wired, and the matching defect underneath it | built |
 
-961 tests, all against a real Postgres. Schema is at migration 019; the
+979 tests, all against a real Postgres. Schema is at migration 019; the
 scheduler's own ledger is created on first use rather than as a migration,
 because it is process bookkeeping rather than part of the memory design.
 
@@ -506,6 +506,28 @@ starts, and `tests/test_p09_wiring.py` asserts that it does — the half
 exists is not a test that anything turns it on. ADJ-06's notice goes through an
 `Outbox`, so a message telling the athlete his Thursday was shortened is
 recorded as something the coach said rather than vanishing into the transport.
+
+**The rides already past need `coach-reconcile`, once.** The fix closes the loop
+from the next ride onward and can do nothing for the backlog: `poll` only
+considers sessions with `reviewed_at is null`, and every affected session was
+reviewed. So `ingest/backfill.py` is a one-off command that matches them, and it
+is deletable once it has been run.
+
+Two things about it are worth knowing before running it. It is a **dry run
+unless given `--apply`**, because it moves prescriptions to 'completed' and
+freezes compliance against them, which changes past weeks' adherence in the
+Sunday review. And the dry run is the real pass **inside a rolled-back
+transaction** rather than a read-only imitation: `review.match` answers from
+stored state, so a read-only plan would offer one prescription to every ride on
+that day and promise what the apply could not keep. Simulating and discarding
+solves that without a second copy of the matching rules, which would have been
+the fourth place in this repository where two implementations of one thing have
+to agree.
+
+It reviews nothing and adjusts nothing. Re-reviewing would write a second note
+and spend a model call per session to repeat what was said at the time, and
+running P09's rules over months of history is the backfill case `finish` guards
+against by parameter.
 
 ### One requirement built early, on purpose
 

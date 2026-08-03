@@ -125,6 +125,7 @@ src/coach/
     review.py      prescription matching, compliance, reviews, missed sessions
     reconcile.py   the poll and the bulk backfill
     service.py     the pipeline every ingest path calls
+    backfill.py    one-off: match the rides the live path missed (coach-reconcile)
     webhook.py     the receiver and its delivery queue; idle without an app
     server.py      the process: routes, activity poll, wellness, calendar, sweep
   health/          P04 and P05: intake, body mass, recovery
