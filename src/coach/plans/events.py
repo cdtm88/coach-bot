@@ -49,6 +49,42 @@ TYPES = {
     "yoga": "Yoga",
 }
 
+# Words that mean one of the above and are not it. `cycling` is the one that
+# cost something: the coach wrote it through `write_session_events`, this map
+# did not hold it, and every ride it planned published as `Workout` — which is
+# upstream's catch-all, renders with a dumbbell, and is not a ride the platform
+# will compute cycling load for. The fallback was working exactly as designed
+# and the design assumed a vocabulary gap would be rare.
+#
+# Kept separate from `TYPES` rather than folded into it so the canonical set
+# below stays the set the coach is offered, and an alias stays visibly a repair
+# of something already written rather than a second name for a discipline.
+ALIASES = {
+    "cycling": "ride",
+    "bike": "ride",
+    "indoorcycling": "virtualride",
+    "zwift": "virtualride",
+    "turbo": "virtualride",
+    "weights": "gym",
+    "lifting": "gym",
+}
+
+# What the coach may choose from. `TYPES` is the superset it may *arrive* as,
+# because rows written before a name existed still have to publish.
+DISCIPLINES = tuple(TYPES)
+
+
+def canonical(discipline: str) -> str:
+    """The stored form of a discipline name.
+
+    Applied where a discipline is written rather than where it is read, so the
+    database converges on one vocabulary instead of carrying every spelling the
+    model has ever reached for.
+    """
+    lowered = str(discipline).strip().lower()
+    return ALIASES.get(lowered, lowered)
+
+
 # The type an unrecognised discipline publishes as. `Workout` is upstream's own
 # catch-all and it renders on the calendar, which is the point: a session the coach
 # planned must appear even if its discipline is new. Logged where it is used.
@@ -89,8 +125,12 @@ def activity_type(discipline: str) -> str:
     Falls back rather than raising. A discipline the map has not caught up with is
     a session the athlete is still expected to do, and refusing to publish it
     would turn a vocabulary gap into a missing training day.
+
+    Aliases are resolved here as well as at write time, so a row already stored
+    under an old spelling publishes correctly on its next pass rather than
+    waiting for a migration.
     """
-    return TYPES.get(discipline.lower(), FALLBACK_TYPE)
+    return TYPES.get(canonical(discipline), FALLBACK_TYPE)
 
 
 def _intensity_line(spec: dict[str, Any]) -> str | None:

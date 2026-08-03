@@ -24,6 +24,7 @@ from coach.memory import context as ctxmod
 from coach.memory import facts as factmod
 from coach.memory import keys as keymod
 from coach.memory import state as statemod
+from coach.plans import agenda as agendamod
 
 
 def render_constraints(conn: psycopg.Connection) -> str:
@@ -210,6 +211,22 @@ def render_calendar(conn: psycopg.Connection, now: datetime, tz: ZoneInfo) -> st
     return calmod.context(conn, clock.local_day(now, tz), tz)
 
 
+def render_today(conn: psycopg.Connection, now: datetime, tz: ZoneInfo) -> str:
+    """What day it is, where in the block, and what is prescribed.
+
+    The prompt carried none of this. It passed `now` into half a dozen renderers
+    so they could cut their windows correctly and never told the model what the
+    date or the time was, and no block anywhere held the plan — the agent could
+    write a prescription and had no way to read one back.
+
+    The visible cost was a coach that answered "what session?" out of the
+    athlete's own diary, because THE WEEK AHEAD was the only thing in the prompt
+    shaped like a schedule, and reported a session six hours in the future as
+    having already happened.
+    """
+    return agendamod.context(conn, clock.local_day(now, tz), tz, now)
+
+
 def render_interruption(claimed: Any | None) -> str:
     """The one item the coach may raise this conversation, if any (CHAT-11)."""
     if claimed is None:
@@ -242,6 +259,10 @@ def assemble(
     parts = {
         "persona": persona.load(),
         "constraints": render_constraints(conn),
+        # First of the volatile blocks, and first for a reason: everything below
+        # is evidence about the athlete, and this is where he is standing. It
+        # changes every turn, so it sits after the cache breakpoint.
+        "today": render_today(conn, now, tz or clock.configured_tz()),
         "facts": render_facts(conn),
         "unreadable": render_unreadable(conn, now, tz or clock.configured_tz()),
         "body_mass": render_body_mass(conn, now, tz or clock.configured_tz()),

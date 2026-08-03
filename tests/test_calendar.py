@@ -633,7 +633,11 @@ def test_the_calendar_reaches_the_prompt(conn, one_feed) -> None:
 
     assembled = prompt.assemble(conn, datetime(2026, 7, 28, 9, 0, tzinfo=DUBAI), tz=DUBAI)
     assert "calendar" in assembled.names()
-    assert "THE WEEK AHEAD" in assembled.render()
+    # "HIS DIARY", not "THE WEEK AHEAD". The old heading is why the coach
+    # answered "what session?" out of this block: it was the only thing in the
+    # prompt shaped like a schedule, and its name said it was the week's plan.
+    assert "HIS DIARY" in assembled.render()
+    assert "not training sessions" in assembled.render()
 
 
 # --- CHAT-06: the tool ---------------------------------------------------------

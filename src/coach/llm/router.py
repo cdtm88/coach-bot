@@ -8,9 +8,12 @@ back to the heavier model rather than failing the turn.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from decimal import Decimal
+
+log = logging.getLogger(__name__)
 
 # Purposes the router knows about. Kept in step with the check constraint on
 # model_calls.purpose.
@@ -63,16 +66,59 @@ def _env_key(purpose: str) -> str:
     return f"MODEL_{purpose.upper()}"
 
 
+def _effort_key(purpose: str) -> str:
+    return f"EFFORT_{purpose.upper()}"
+
+
+# Effort is the cost and latency lever. A turn is short and interactive; the
+# nightly pass is neither.
+EFFORTS = ("low", "medium", "high")
+DEFAULT_EFFORT = {"chat": "low"}
+
+
 def route(purpose: str) -> Route:
-    """Resolve a purpose to a model. MODEL-02: environment, not code."""
+    """Resolve a purpose to a model and an effort. MODEL-02: environment, not code.
+
+    Effort is configurable for the same reason the model is, and it was not.
+    MODEL-02 made the model an environment variable and left this hard-coded, so
+    the only lever on conversation quality moved the model underneath an effort
+    setting that still said "low" — raising `MODEL_CHAT` to a heavier model and
+    getting a barely different answer is a confusing thing for an operator to
+    debug, and the knob that mattered was not exposed.
+
+    The default is unchanged. PERF-01 asks for streaming inside four seconds at
+    p95 and the running cost is the operator's call, so this makes the trade
+    available rather than making it for them.
+    """
     if purpose not in PURPOSES:
         raise UnknownPurpose(f"purpose must be one of {PURPOSES}, got {purpose!r}")
 
     model = os.environ.get(_env_key(purpose)) or DEFAULTS[purpose]
-    # Effort is the cost and latency lever. A turn is short and interactive; the
-    # nightly pass is neither.
-    effort = "low" if purpose == "chat" else "high"
+    effort = _effort(purpose)
     return Route(purpose=purpose, model=model, effort=effort)
+
+
+def _effort(purpose: str) -> str:
+    """The configured effort, or the default. An unknown value falls back.
+
+    Same reasoning as the notification hours: a typo in an effort setting must
+    not stop the coach replying, and the cost of the wrong tier is a worse
+    answer rather than no answer.
+    """
+    default = DEFAULT_EFFORT.get(purpose, "high")
+    configured = os.environ.get(_effort_key(purpose), "").strip().lower()
+    if not configured:
+        return default
+    if configured not in EFFORTS:
+        log.warning(
+            "%s=%r is not one of %s; using %s",
+            _effort_key(purpose),
+            configured,
+            EFFORTS,
+            default,
+        )
+        return default
+    return configured
 
 
 def fallback_for(route_: Route) -> Route | None:
