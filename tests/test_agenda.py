@@ -365,3 +365,122 @@ def test_both_blocks_reach_the_prompt(conn: psycopg.Connection) -> None:
 
     assert rendered.index("TODAY") < rendered.index("HIS DIARY")
     assert "Base endurance" in rendered
+
+
+# --- re-planning a week rather than doubling it -----------------------------
+
+
+def test_replanning_withdraws_the_old_plan(conn: psycopg.Connection) -> None:
+    """Without this the tool only ever added.
+
+    The three blank sessions on his calendar could not be removed by anything
+    the coach could reach: `write_session_events` inserts, and no tool cancels.
+    Asking it to re-plan the week would have left him looking at both plans at
+    once, the old one still publishing as empty blocks.
+    """
+    write(conn, spec={**RIDE, "purpose": "the old plan"})
+
+    result = tools.dispatch(
+        conn,
+        "write_session_events",
+        {
+            "replaces": {"since": "2026-08-03", "until": "2026-08-09"},
+            "events": [
+                {
+                    "planned_for": "2026-08-04T18:00:00",
+                    "discipline": "ride",
+                    "spec": {**RIDE, "purpose": "the new plan"},
+                }
+            ],
+        },
+    )
+
+    assert result["withdrawn"] == 1
+    assert result["written"] == 1
+    with conn.cursor() as cur:
+        cur.execute("select spec->>'purpose' as purpose from prescriptions")
+        assert [r["purpose"] for r in cur.fetchall()] == ["the new plan"]
+
+
+def test_replanning_never_touches_a_session_he_has_done(conn: psycopg.Connection) -> None:
+    """BLOCK-08's guard: a prescription with a session attached is history."""
+    write(conn)
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "insert into sessions (source, discipline, started_at, local_date, duration_s) "
+            "values ('intervals', 'ride', '2026-08-03T14:00Z', %s, 2700) returning id",
+            (MONDAY,),
+        )
+        session_id = cur.fetchone()["id"]
+        cur.execute("update prescriptions set status = 'completed', session_id = %s", (session_id,))
+
+    result = tools.dispatch(
+        conn,
+        "write_session_events",
+        {
+            "replaces": {"since": "2026-08-03", "until": "2026-08-09"},
+            "events": [
+                {"planned_for": "2026-08-05T18:00:00", "discipline": "ride", "spec": dict(RIDE)}
+            ],
+        },
+    )
+
+    assert result["withdrawn"] == 0
+    with conn.cursor() as cur:
+        cur.execute("select count(*)::int as n from prescriptions where status = 'completed'")
+        assert cur.fetchone()["n"] == 1
+
+
+def test_a_rejected_replan_does_not_empty_the_week(conn: psycopg.Connection) -> None:
+    """Delete and insert are one transaction, after validation.
+
+    Otherwise a bad re-plan withdraws the week and writes nothing back, which is
+    worse than either plan.
+    """
+    write(conn)
+
+    result = tools.dispatch(
+        conn,
+        "write_session_events",
+        {
+            "replaces": {"since": "2026-08-03", "until": "2026-08-09"},
+            "events": [{"planned_for": "2026-08-05T18:00:00", "discipline": "ride", "spec": {}}],
+        },
+    )
+
+    assert result["written"] == 0
+    with conn.cursor() as cur:
+        cur.execute("select count(*)::int as n from prescriptions")
+        assert cur.fetchone()["n"] == 1
+
+
+def test_writing_without_replaces_still_only_adds(conn: psycopg.Connection) -> None:
+    """Adding a session to a week is the common case and must stay the default."""
+    write(conn)
+
+    result = write(conn, planned_for="2026-08-06T18:00:00")
+
+    assert result["withdrawn"] == 0
+    with conn.cursor() as cur:
+        cur.execute("select count(*)::int as n from prescriptions")
+        assert cur.fetchone()["n"] == 2
+
+
+def test_replanning_leaves_another_week_alone(conn: psycopg.Connection) -> None:
+    write(conn, planned_for="2026-08-12T18:00:00")
+
+    result = tools.dispatch(
+        conn,
+        "write_session_events",
+        {
+            "replaces": {"since": "2026-08-03", "until": "2026-08-09"},
+            "events": [
+                {"planned_for": "2026-08-05T18:00:00", "discipline": "ride", "spec": dict(RIDE)}
+            ],
+        },
+    )
+
+    assert result["withdrawn"] == 0
+    with conn.cursor() as cur:
+        cur.execute("select count(*)::int as n from prescriptions")
+        assert cur.fetchone()["n"] == 2
