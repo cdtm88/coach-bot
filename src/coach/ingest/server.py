@@ -349,19 +349,26 @@ def poller(
     write_note: Callable[[dict[str, Any]], str],
     stop: threading.Event,
     interval_s: int | None = None,
+    adjust: bool = False,
+    send: Callable[[str], None] | None = None,
 ) -> None:
-    """The fast loop: find new activities and new files, and review them.
+    """The fast loop: find new activities and new files, match and review them.
 
     This is the primary ingest path, not a backstop. With no registered app there
     is no webhook, so nothing pushes a new ride at us and PERF-03's five minute
     budget has to be met by asking often enough.
+
+    `adjust` is what turns P09 on, and it is a parameter rather than a constant
+    because a backfill must not restructure anything and because running the
+    loop without it is how the rules are debugged. `main` passes True; see
+    `service.finish` for what runs and in what order.
     """
     every = interval_s if interval_s is not None else reconcilemod.poll_interval_s()
-    log.info("polling every %ds", every)
+    log.info("polling every %ds, adjustments %s", every, "on" if adjust else "off")
 
     def once() -> dict[str, Any]:
         with connect() as conn:
-            return service.poll(conn, client, tz, write_note)
+            return service.poll(conn, client, tz, write_note, adjust=adjust, send=send)
 
     _loop("poll", stop, every, once)
 
@@ -485,6 +492,41 @@ def plan_poller(
     _loop("plans", stop, every, once)
 
 
+def _notifier() -> Callable[[str], None] | None:
+    """ADJ-06's sender, bound to the allowlisted chat, or nothing.
+
+    Returns a one-argument callable so `adjust.apply.execute` keeps its existing
+    signature and never learns that Telegram exists. What it is bound to is an
+    `Outbox`, so the notice is recorded as something the coach said before it is
+    sent, and `period_key` is left unset: an adjustment is event-driven and its
+    idempotency is `adjustment_events.announced`, not a once-per-day claim.
+    """
+    try:
+        from coach.notify import outbox as outboxmod
+        from coach.runtime import transport
+        from coach.telegram import bot as botmod
+
+        allowlist = botmod.Allowlist()
+        telegram = transport.Telegram()
+    except Exception as exc:  # noqa: BLE001 - the ride matters more than the message
+        log.warning("ADJ-06 notices not wired: %s", exc)
+        return None
+
+    box = outboxmod.Outbox(lambda text: telegram.send(allowlist.chat_id, text))
+
+    def send(text: str) -> None:
+        # A connection per notice rather than one held open: this is called from
+        # inside a poll pass that already has one, but `execute` is given a
+        # transport rather than a connection by design, and reaching back for
+        # the caller's would make the seam worse than the extra connect.
+        from coach import db
+
+        with db.connect() as conn:
+            box.send(conn, text, kind="adjustment")
+
+    return send
+
+
 def main() -> None:
     """Run the webhook route and the backstop loop together."""
     from coach import db
@@ -499,8 +541,18 @@ def main() -> None:
 
     # No review writer wired yet: the note generation call belongs to the agent
     # and is threaded through when the two processes are joined. Until then this
-    # ingests and matches without spending a model call.
+    # ingests, matches and adjusts without spending a model call.
     write_note = service.no_review
+
+    # ADJ-06's notice, through the outbox so it lands in `messages` like every
+    # other thing the coach says. A bare transport here would repeat the defect
+    # PR #38 fixed: the athlete would be told his Thursday had been shortened
+    # and the coach would have no record of having said so.
+    #
+    # Allowed to be absent. A missing Telegram token should cost the notice and
+    # not the ingest loop, which is the same reasoning the scheduler applies to
+    # its own sender.
+    send = _notifier()
 
     threads = [
         # The webhook drain. Idle unless a webhook is actually configured, which
@@ -511,10 +563,12 @@ def main() -> None:
             daemon=True,
             name="drain",
         ),
-        # The primary ingest path while there is no webhook.
+        # The primary ingest path while there is no webhook, and the only place
+        # P09 runs. `adjust=True` appears here and nowhere else in `src/`.
         threading.Thread(
             target=poller,
             args=(db.connect, client, tz, write_note, stop),
+            kwargs={"adjust": True, "send": send},
             daemon=True,
             name="poll",
         ),

@@ -891,12 +891,17 @@ def test_the_rules_run_on_ingest_and_only_when_asked() -> None:
     """
     from coach.ingest import service
 
-    source = inspect.getsource(service.on_activity)
-    assert "adjust: bool = False" in inspect.getsource(service.on_activity).replace("\n", " ") or (
-        "adjust" in inspect.signature(service.on_activity).parameters
-    )
-    assert inspect.signature(service.on_activity).parameters["adjust"].default is False
-    assert "not backfilled" in source
+    # Both ingest paths take the flag and both default it to off. A backfill
+    # replaying two years of rides goes through `on_activity`; the live poll is
+    # the path that turns it on, and `server.main` is the only place that does.
+    for entry in (service.on_activity, service.poll, service.finish):
+        assert entry.__name__ and inspect.signature(entry).parameters["adjust"].default is False
+
+    # The guard moved when the two paths were given one shared tail: the poll
+    # never matched a ride to its prescription, so match, freeze, review and
+    # adjust now live in `finish` and both callers use it. The property is
+    # unchanged and is asserted behaviourally in `test_p09_wiring.py`.
+    assert "not backfilled" in inspect.getsource(service.finish)
 
 
 def test_compliance_is_frozen_when_the_session_is_matched(conn: psycopg.Connection) -> None:

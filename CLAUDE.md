@@ -28,14 +28,22 @@ built, tested green, and wired to nothing:
 - `record_reply` had one caller, so the coach never heard its own morning
   message
 - `blocks.generate.rewrite_from` implements BLOCK-08 and nothing calls it
-- `adjust.pass_.run` needs `adjust=True`, which appears nowhere in `src/`, so
-  **P09 does not run**
+- `adjust.pass_.run` needed `adjust=True`, which appeared nowhere in `src/`, so
+  P09 never ran. Fixed 3 August 2026, and underneath it: `review.match` had no
+  caller on the live path either, so **no ride was ever matched to its
+  prescription** on the running deployment
 
 A unit test proves a function works. It cannot prove anything reaches it. When
 you add an entry point, a hook or a flag, grep for its caller in `src/` and say
 in the PR what that caller is. `tests/test_adjust.py:894` asserts the `adjust`
 flag exists and defaults to False, which is a test that the switch is installed,
-not that anything turns it on.
+not that anything turns it on; `tests/test_p09_wiring.py` is the other half.
+
+**The tell is a symptom that reads as normal.** The sweep reported those
+prescriptions "unmatched rather than missed", which is correct behaviour and
+looks like a plan nobody is following. Nothing errored, nothing was logged, and
+no test failed. When a phase's output is a *status quo* rather than an error,
+assert the caller exists.
 
 ## Do not
 
@@ -79,7 +87,7 @@ re-request before concluding anything about CI.
 
 ```bash
 ./scripts/dev-db.sh start     # Postgres dies on container churn; this brings it back
-uv run pytest -q              # ~3.5 minutes, real Postgres, 944 tests
+uv run pytest -q              # ~3.5 minutes, real Postgres, 956 tests
 uv run ruff check . && uv run ruff format --check .
 ```
 

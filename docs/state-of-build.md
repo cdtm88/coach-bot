@@ -35,8 +35,9 @@
 | P15 | The model call ledger: what was sent, what came back, readable (OBS-10 to OBS-14) | built |
 | — | `CLAUDE.md`, the resolved-debug directory, and the corrected zone tables | built |
 | P16 | The trust layer, in shadow (TRUST-01 to TRUST-08) | built |
+| — | P09 wired, and the matching defect underneath it | built |
 
-944 tests, all against a real Postgres. Schema is at migration 019; the
+956 tests, all against a real Postgres. Schema is at migration 019; the
 scheduler's own ledger is created on first use rather than as a migration,
 because it is process bookkeeping rather than part of the memory design.
 
@@ -470,31 +471,41 @@ accepts an `on_text` callback, but the agent does not pass one — Telegram has 
 partial-message API worth the complexity, so the reply is sent whole. Revisit if
 PERF-01's p95 becomes a real complaint rather than a number.
 
-**P09 does not run.** Found on 3 August 2026 while tracing the outbound message
-paths, and it is the fourth instance of the failure this project keeps meeting:
-the phase is built, its tests pass, and nothing calls it.
+**P09 now runs, and fixing it uncovered something larger.** *Recorded 3 August
+2026: found while tracing the outbound message paths, wired the same day on the
+athlete's instruction.*
 
-`adjust.pass_.run` is reached from exactly one place, `ingest.service.on_activity`,
-and only when its `adjust` flag is true. `adjust=True` appears nowhere in `src/`.
-Worse, `on_activity` itself has one caller in `src/` — `_handle_delivery`, on the
-webhook path, which is the path "How ingest actually works now" records as built,
-tested and **idle**. The primary path is the poll, which goes through
-`reconcile.run` and never calls `on_activity` at all. So ADJ-01 to ADJ-08 are
-unreachable twice over: the flag is never set, and the only caller that could set
-it is not running.
+The original finding was the fourth instance of the failure this project keeps
+meeting. `adjust.pass_.run` is reached from one place, `ingest.service.on_activity`,
+and only when its `adjust` flag is true; `adjust=True` appeared nowhere in
+`src/`. `on_activity` itself had one caller — `_handle_delivery`, on the webhook
+path, which is built, tested and **idle**. So ADJ-01 to ADJ-08 were unreachable
+twice over.
 
-`tests/test_adjust.py:894` asserts that the `adjust` parameter exists and defaults
-to False. That is a test that the switch is installed, not that anything turns it
-on, which is precisely the distinction `docs/prior-art.md` §5 records as
-pacer-ai's top retrospective lesson: name the real caller, not just the test.
+**The larger thing was underneath it.** The live poll path did not call
+`on_activity` at all: it called `review.review` alone. `review.match` and
+`review.attach` had two callers in the whole of `src/`, one on the idle webhook
+path and one in `logbook.capture`. So **no ride ingested by the running
+deployment was ever matched to its prescription.** Sessions kept a null
+`prescription_id`, prescriptions stayed 'planned' indefinitely, compliance was
+never frozen, and every ADJ rule would have read a figure that did not exist.
 
-**It is deliberately still off.** Wiring it is not a defect fix — it starts a
-system autonomously reshaping the athlete's week from ride data, and that is a
-decision rather than a repair. Turning it on means choosing the path (the poll,
-not the dormant webhook), and giving `apply.execute` a sender, which now means an
-`Outbox` so an ADJ-06 notice reaches the coach's own history like every other
-thing it says. Until then the honest statement is that the asymmetry described
-below is designed and tested, and has never applied to a real session.
+The FIT-12 sweep is why this was invisible rather than loud. A prescription with
+a session on the same day is reported "unmatched rather than missed", so nothing
+was ever wrongly called a miss — it stayed open instead, which reads as a plan
+nobody is following rather than as a bug.
+
+The fix is one shared tail. `service.finish` does match, freeze, review and
+adjust in that order, and both ingest paths call it. Two call sites that must
+agree about the order of four operations is precisely the seam this project
+keeps finding defects in.
+
+`adjust=True` now appears exactly once in `src/`, in the thread `ingest.server.main`
+starts, and `tests/test_p09_wiring.py` asserts that it does — the half
+`tests/test_adjust.py:894` could never assert, since a test that the switch
+exists is not a test that anything turns it on. ADJ-06's notice goes through an
+`Outbox`, so a message telling the athlete his Thursday was shortened is
+recorded as something the coach said rather than vanishing into the transport.
 
 ### One requirement built early, on purpose
 

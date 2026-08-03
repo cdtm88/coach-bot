@@ -116,21 +116,68 @@ def on_activity(
     if file_bytes and activity_id:
         archivemod.keep_original(conn, activity_id, file_bytes, ingested.session_id)
 
-    prescription_id = reviewmod.match(conn, ingested.session_id)
+    return finish(
+        conn, result, tz, write_note, backfilled=backfilled, adjust=adjust, now=now, send=send
+    )
+
+
+def finish(
+    conn: psycopg.Connection,
+    result: Handled,
+    tz: ZoneInfo,
+    write_note: Callable[[dict[str, Any]], str] = no_review,
+    backfilled: bool = False,
+    adjust: bool = False,
+    now: datetime | None = None,
+    send: Callable[[str], None] | None = None,
+) -> Handled:
+    """Everything that happens once a session row exists: match, freeze, review, adjust.
+
+    **This is shared because it was not, and the poll never did any of it.** Both
+    ingest paths produce a session row and then owe it the same four steps.
+    `on_activity` did all four and its only caller is the webhook drain, which is
+    idle; `poll` is the live path and it did the third one alone. So on the
+    running deployment no ride was ever matched to a prescription: sessions kept
+    a null `prescription_id`, prescriptions stayed 'planned' for ever, compliance
+    was never frozen, and every ADJ rule read a figure that did not exist.
+
+    The FIT-12 sweep hid it rather than surfacing it, and correctly: a
+    prescription with a session on the same day is reported "unmatched rather
+    than missed", so nothing was ever wrongly called a miss. It simply stayed
+    open, which looks like a plan nobody is following.
+
+    One function rather than two call sites in step, because two sites that must
+    agree about the order of four operations is exactly the seam this project
+    keeps finding defects in.
+    """
+    session_id = result.session_id
+    if session_id is None:  # pragma: no cover - a Handled without a session
+        return result
+
+    # FIT-05, and skipped when the row already carries one: `match` claims an
+    # unmatched prescription, so calling it twice for one session would take a
+    # second prescription for a ride that already has one.
+    with conn.cursor() as cur:
+        cur.execute("select prescription_id from sessions where id = %s", (session_id,))
+        row = cur.fetchone()
+    already = row and row["prescription_id"]
+
+    prescription_id = already or reviewmod.match(conn, session_id)
     if prescription_id is not None:
         result.prescription_id = prescription_id
-        result.compliance = reviewmod.attach(conn, ingested.session_id, prescription_id).as_dict()
+        if not already:
+            result.compliance = reviewmod.attach(conn, session_id, prescription_id).as_dict()
 
     # review() returns None by itself for a backfilled session (FIT-09); the
     # check is not repeated here so the two cannot disagree.
-    result.review = reviewmod.review(conn, ingested.session_id, write_note)
+    result.review = reviewmod.review(conn, session_id, write_note)
 
     # ADJ-01: the rules run on ingest, after compliance is frozen — they read it,
     # so the order is a dependency and not a preference.
     if adjust and not backfilled and result.prescription_id is not None:
         from coach.adjust import pass_ as adjustmod
 
-        outcome = adjustmod.run(conn, ingested.session_id, now or datetime.now(UTC), tz, send=send)
+        outcome = adjustmod.run(conn, session_id, now or datetime.now(UTC), tz, send=send)
         result.adjusted = [f"{a.trigger}:{a.action}" for a in outcome.applied]
         result.deferred = list(outcome.deferred)
 
@@ -264,6 +311,9 @@ def poll(
     tz: ZoneInfo,
     write_note: Callable[[dict[str, Any]], str] = no_review,
     lookback_days: int = POLL_LOOKBACK_DAYS,
+    adjust: bool = False,
+    now: datetime | None = None,
+    send: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Find new work and process it. The fast loop.
 
@@ -284,19 +334,34 @@ def poll(
     )
     scanned = archivemod.scan(conn, watch_folder(), tz)
 
-    # Reviews for anything either path just created. The webhook drain reviews
-    # inline; this covers the rides nothing told us about.
-    reviews = []
+    # Match, freeze, review and adjust anything either path just created. This
+    # called `review` alone until 3 August 2026, which meant the live path never
+    # matched a ride to its prescription: see `finish`.
+    reviews: list[int] = []
+    adjusted: list[str] = []
+    deferred: list[str] = []
     for session_id in _unreviewed(conn):
-        body = reviewmod.review(conn, session_id, write_note)
-        if body:
+        handled = finish(
+            conn,
+            Handled(session_id=session_id),
+            tz,
+            write_note,
+            adjust=adjust,
+            now=now,
+            send=send,
+        )
+        if handled.review:
             reviews.append(session_id)
+        adjusted.extend(handled.adjusted)
+        deferred.extend(handled.deferred)
 
     return {
         "reconciled": outcome.created + outcome.updated,
         "errors": outcome.errors,
         "scanned": scanned,
         "reviewed": reviews,
+        "adjusted": adjusted,
+        "deferred": deferred,
     }
 
 
