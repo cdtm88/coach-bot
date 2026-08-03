@@ -231,6 +231,28 @@ because it reads history rather than making calls. Payloads are kept for
 `COACH_PAYLOAD_RETENTION_DAYS`, default 90, and pruned on the nightly pass; the
 cost rows behind `model_calls` are never pruned.
 
+`coach-reconcile` is a one-off, and it is worth running once on any deployment
+that was ingesting before 3 August 2026. Until then the live poll path never
+matched a ride to its prescription, so every completed ride left its
+prescription sitting at 'planned' with no compliance recorded. The fix closes
+the loop from the next ride onward and cannot reach the ones already past; this
+does. `docs/debug/resolved/` has the whole story.
+
+```bash
+coach-reconcile                      # prints what it would match. Writes nothing.
+coach-reconcile --since 2026-07-01   # bound the window
+coach-reconcile --apply              # do it
+```
+
+**Read the dry run before applying.** This moves prescriptions to 'completed'
+and freezes compliance against the ride, so past weeks' adherence in the Sunday
+review changes to match. It will not touch a prescription that was suspended by
+a break, cancelled, or already settled as missed, and it neither reviews nor
+runs the P09 adjustment rules over history.
+
+Once it has been run there is nothing left for it to do, and the module can be
+deleted.
+
 #### Under compose
 
 > The exact command sequence for a first deployment, including the backup restore

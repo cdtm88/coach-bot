@@ -21,6 +21,12 @@ did not exist, had P09 been running, which it was not.
 **Fix:** `ingest.service.finish`, one shared tail doing match, freeze, review
 and adjust in that order, called by both ingest paths. `tests/test_p09_wiring.py`.
 
+**The backlog:** `coach-reconcile` (`ingest/backfill.py`), a one-off. The fix
+closes the loop from the next ride onward and can do nothing for the rides
+already past, because `poll` only considers sessions with `reviewed_at is null`
+and every affected session was reviewed. Dry run by default; `--apply` writes.
+Deletable once it has been run.
+
 ## Eliminated
 
 - **The matcher is too strict.** The obvious first theory, and it has a real
