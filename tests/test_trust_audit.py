@@ -220,6 +220,115 @@ def test_an_empty_ledger_says_so_rather_than_reporting_zero(conn: psycopg.Connec
     assert "0.0%" not in rendered
 
 
+# --- a run that examined nothing is not a pass --------------------------------
+#
+# The live deployment's first audit replayed 0 turns, skipped 59 exchanges, and
+# printed "Nothing was flagged ... evidence the scanner does not fire on the
+# coach's ordinary voice". It was evidence of nothing. Same shape as every other
+# defect found this week: an output that reads as a result.
+
+
+def test_a_run_that_replayed_nothing_is_not_reported_as_clean(
+    conn: psycopg.Connection,
+) -> None:
+    record(conn, "Your FTP is 250 W.", system=[{"text": "His FTP is 168 W."}])
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("delete from model_call_payloads")
+
+    rendered = trust_audit.render(audited(conn))
+
+    assert "is not a pass" in rendered
+    assert "does not fire on the coach's ordinary voice" not in rendered
+
+
+def test_an_empty_payload_table_is_named_as_an_outage(conn: psycopg.Connection) -> None:
+    """Not "some payloads are missing" but "the ledger has recorded nothing".
+
+    OBS-11 makes one missing payload a non-event by design. All of them is the
+    ledger not working, and `_record_payload` swallows its own exception, so the
+    report has to say where to look.
+    """
+    record(conn, "Anything.", system=[{"text": "His FTP is 168 W."}])
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("delete from model_call_payloads")
+
+    rendered = trust_audit.render(audited(conn))
+
+    assert "recorded nothing at all" in rendered
+    assert "could not record the payload" in rendered, "must name the log line to grep"
+    assert "migration 018" in rendered
+
+
+def test_exchanges_older_than_the_ledger_are_explained_not_alarming(
+    conn: psycopg.Connection,
+) -> None:
+    """The likely truth on the deployment: those 59 predate OBS-10.
+
+    A call made before the payload table existed is not a fault and cannot be
+    recovered, and saying so is the difference between "check the logs" and
+    "wait for the ledger to fill".
+    """
+    record(conn, "Old turn.", turn_id=None)
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("delete from model_call_payloads")
+        cur.execute("update model_calls set created_at = created_at - interval '10 days'")
+    record(conn, "New turn.", system=[{"text": "His FTP is 168 W."}])
+
+    report = audited(conn)
+    rendered = trust_audit.render(report)
+
+    assert report.unreadable == 1
+    assert report.predate_the_ledger
+    assert "older than the earliest payload" in rendered
+    assert "rather than a fault" in rendered
+
+
+def test_a_gap_after_the_ledger_started_is_reported_as_a_failure(
+    conn: psycopg.Connection,
+) -> None:
+    """The other side. A payload missing from a call *after* OBS-10 shipped is a
+    write that failed, and must not be filed under "predates the ledger"."""
+    record(conn, "Recorded fine.", turn_id=None, system=[{"text": "His FTP is 168 W."}])
+    second = record(conn, "Lost its payload.", system=[{"text": "His FTP is 168 W."}])
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "delete from model_call_payloads where call_id = "
+            "  (select max(call_id) from model_call_payloads)"
+        )
+    assert second is not None
+
+    report = audited(conn)
+    rendered = trust_audit.render(report)
+
+    assert report.unreadable == 1
+    assert not report.predate_the_ledger
+    assert "not simply" in rendered and "predate" in rendered
+
+
+# --- a thin sample is not a clean bill ----------------------------------------
+
+
+def test_a_clean_run_under_the_floor_says_it_is_thin(conn: psycopg.Connection) -> None:
+    record(conn, "You held 168 W.", system=[{"text": "His FTP is 168 W."}])
+
+    rendered = trust_audit.render(audited(conn))
+
+    assert "thin sample" in rendered
+
+
+def test_a_clean_run_at_the_floor_does_not(conn: psycopg.Connection) -> None:
+    """The other boundary, per the threshold rule."""
+    report = trust_audit.Report(turns=trust_audit.THIN_EVIDENCE, ledger_from=None)
+
+    assert "thin sample" not in trust_audit.render(report)
+
+
+def test_a_clean_run_one_below_the_floor_does(conn: psycopg.Connection) -> None:
+    report = trust_audit.Report(turns=trust_audit.THIN_EVIDENCE - 1, ledger_from=None)
+
+    assert "thin sample" in trust_audit.render(report)
+
+
 def test_quiet_gives_the_rate_without_the_conversation(conn: psycopg.Connection) -> None:
     record(conn, "Your FTP is 250 W.", system=[{"text": "His FTP is 168 W."}])
 
