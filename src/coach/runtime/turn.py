@@ -30,6 +30,7 @@ turn ends with what it has rather than continuing.
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -70,6 +71,10 @@ class Turn:
     retried: bool = False
     capped: bool = False
     context_tokens: int = 0
+    # OBS-12. Minted here because this function is the boundary of an exchange:
+    # every model call it causes, including the tool rounds and the naturalness
+    # retry, belongs to the one message the athlete sent.
+    turn_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 
 def candidates(conn: psycopg.Connection, today: date) -> list[interruptions.Candidate]:
@@ -169,6 +174,7 @@ def _converse(
             tools=tools.SCHEMAS,
             conn=conn,
             on_text=on_text,
+            turn_id=turn.turn_id,
         )
         if not completion.tool_uses:
             return completion.text

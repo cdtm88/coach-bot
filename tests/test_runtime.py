@@ -65,11 +65,29 @@ class FakeModel:
         self.replies = list(replies) or [FakeReply("Fine. How did the hip feel?")]
         self.calls: list[dict[str, Any]] = []
 
-    def __call__(self, client, purpose, system, messages, tools=None, conn=None, on_text=None):
+    def __call__(
+        self,
+        client,
+        purpose,
+        system,
+        messages,
+        tools=None,
+        conn=None,
+        on_text=None,
+        turn_id=None,
+    ):
         from coach.llm.client import Completion
 
         self.calls.append(
-            {"purpose": purpose, "system": system, "messages": list(messages), "tools": tools}
+            {
+                "purpose": purpose,
+                "system": system,
+                "messages": list(messages),
+                "tools": tools,
+                # OBS-12. Recorded rather than ignored, so the tests below can
+                # assert that every call of one exchange carries the same id.
+                "turn_id": turn_id,
+            }
         )
         reply = self.replies[min(len(self.calls) - 1, len(self.replies) - 1)]
         return Completion(
@@ -210,6 +228,25 @@ def test_a_narrating_reply_is_retried_once(conn, monkeypatch) -> None:
     assert result.violations == []
     assert result.reply == "Right, that changes Thursday."
     assert "CHAT-03" in fake.calls[1]["messages"][-1]["content"]
+
+
+def test_a_retry_belongs_to_the_same_exchange(conn, monkeypatch) -> None:
+    """OBS-12, on the path most likely to get it wrong.
+
+    The naturalness retry is a second model call for the same athlete message.
+    Reading the ledger back, it has to appear inside the turn it is retrying —
+    a retry filed as its own exchange is exactly the thing that would make a
+    transcript misleading, because it reads as the coach answering twice.
+    """
+    fake = use_model(
+        monkeypatch,
+        FakeReply("Noted. I've saved that to your profile."),
+        FakeReply("Right, that changes Thursday."),
+    )
+    result = turn.respond(conn, None, [{"body": "my knee hurts on the left"}], NOW, tz=DUBAI)
+
+    assert len(fake.calls) == 2
+    assert {c["turn_id"] for c in fake.calls} == {result.turn_id}
 
 
 def test_a_second_violation_is_sent_anyway_and_logged(conn, monkeypatch, caplog) -> None:
@@ -716,7 +753,13 @@ def test_the_ledger_records_what_happened(conn) -> None:
 
 
 def test_every_process_is_a_console_script() -> None:
-    """The gap this package closed: `coach-ingest` was the only one."""
+    """The gap this package closed: `coach-ingest` was the only one.
+
+    `coach-transcript` is the one entry here that is not a process. It is an
+    operator command, OBS-13's way into the call ledger, and it is in the same
+    list because the reason for the list is that an entry point nobody declared
+    is an entry point nobody can run.
+    """
     import tomllib
     from pathlib import Path
 
@@ -729,6 +772,7 @@ def test_every_process_is_a_console_script() -> None:
         "coach-ingest",
         "coach-agent",
         "coach-scheduler",
+        "coach-transcript",
     }
 
 

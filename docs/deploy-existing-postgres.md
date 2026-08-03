@@ -37,7 +37,7 @@ stop activity ingest.
 | `migrate` | `python -m coach.migrate`, runs once, exits 0 |
 | `coach-agent` | Telegram long poll; one reply per backlog |
 | `coach-ingest` | two HTTP routes and six polling loops |
-| `coach-scheduler` | the nightly jobs at 03:00, and P10's three timed messages |
+| `coach-scheduler` | the nightly jobs at 03:00, P10's three timed messages, and OBS-14's payload prune |
 
 Only `coach-agent` and `coach-scheduler` need the Anthropic key. Only
 `coach-ingest` needs the macro secret and the calendar URLs. Each gets what it

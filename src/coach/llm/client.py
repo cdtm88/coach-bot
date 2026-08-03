@@ -1,8 +1,15 @@
 """The Anthropic client wrapper: routing, streaming, accounting, fallback.
 
 Every model call in the system goes through :func:`complete`. That is what makes
-MODEL-01's "routing is recorded per call" and OBS-01's per-call cost logging
-true by construction rather than by discipline.
+MODEL-01's "routing is recorded per call", OBS-01's per-call cost logging and
+OBS-10's payload ledger true by construction rather than by discipline. Nothing
+was added to any call site to make the ledger cover consolidation, the session
+review and the Sunday voicing; they were already coming through here.
+
+**The ledger never costs a call.** OBS-11. The payload is written after the cost
+row, in its own transaction, and a failure to write it is logged and swallowed.
+A `model_calls` row with no payload is a normal outcome; a turn the athlete
+never got because the logging broke would not be.
 """
 
 from __future__ import annotations
@@ -15,6 +22,7 @@ from typing import Any
 
 import anthropic
 import psycopg
+from psycopg.types.json import Jsonb
 
 from coach.llm import router
 
@@ -38,12 +46,18 @@ class Completion:
     cache_write_tokens: int = 0
     routed_from: str | None = None
     latency_ms: int = 0
+    # OBS-12. Set by the caller that owns the exchange; None for a call that is
+    # not part of one, which is every scheduled job.
+    turn_id: str | None = None
 
 
-def _record(conn: psycopg.Connection | None, completion: Completion) -> None:
-    """MODEL-01 and OBS-01: one row per call, whatever the outcome."""
+def _record(conn: psycopg.Connection | None, completion: Completion) -> int | None:
+    """MODEL-01 and OBS-01: one row per call, whatever the outcome.
+
+    Returns the row's id so OBS-10's payload has something to hang off.
+    """
     if conn is None:
-        return
+        return None
     cost = router.cost_usd(
         completion.model,
         completion.input_tokens,
@@ -56,8 +70,10 @@ def _record(conn: psycopg.Connection | None, completion: Completion) -> None:
             """
             insert into model_calls (purpose, model, routed_from, input_tokens,
                                      output_tokens, cache_read_tokens,
-                                     cache_write_tokens, cost_usd, latency_ms)
-            values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                     cache_write_tokens, cost_usd, latency_ms,
+                                     turn_id)
+            values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            returning id
             """,
             (
                 completion.purpose,
@@ -69,8 +85,64 @@ def _record(conn: psycopg.Connection | None, completion: Completion) -> None:
                 completion.cache_write_tokens,
                 cost,
                 completion.latency_ms,
+                completion.turn_id,
             ),
         )
+        return int(cur.fetchone()["id"])
+
+
+def _response_of(completion: Completion) -> dict[str, Any]:
+    """What came back, as plain data.
+
+    The SDK's content blocks are not JSON-serialisable and holding a reference to
+    them in a stored payload would tie the ledger's schema to the SDK's. Tool
+    inputs are copied into plain dicts for the same reason.
+    """
+    return {
+        "text": completion.text,
+        "model": completion.model,
+        "stop_reason": completion.stop_reason,
+        "tool_uses": [
+            {"id": use.id, "name": use.name, "input": dict(use.input)}
+            for use in completion.tool_uses
+        ],
+    }
+
+
+def _record_payload(
+    conn: psycopg.Connection | None,
+    call_id: int | None,
+    system: list[dict[str, Any]],
+    messages: Sequence[dict[str, Any]],
+    tools: Sequence[dict[str, Any]] | None,
+    completion: Completion,
+) -> None:
+    """OBS-10, and OBS-11's promise that it cannot cost a call.
+
+    Deliberately not inside `_record`'s transaction. The cost row is an
+    accounting record and the payload is a debugging one; a disk full, a value
+    the serialiser chokes on, or a schema that has not been migrated yet should
+    lose the second and keep the first.
+    """
+    if conn is None or call_id is None:
+        return
+    try:
+        with conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                """
+                insert into model_call_payloads (call_id, system, messages, tools, response)
+                values (%s, %s, %s, %s, %s)
+                """,
+                (
+                    call_id,
+                    Jsonb(list(system)),
+                    Jsonb(list(messages)),
+                    Jsonb(list(tools)) if tools else None,
+                    Jsonb(_response_of(completion)),
+                ),
+            )
+    except Exception:  # noqa: BLE001 - a lost payload must never be a lost turn
+        log.exception("could not record the payload for model_call %s", call_id)
 
 
 def _call(
@@ -129,8 +201,9 @@ def complete(
     conn: psycopg.Connection | None = None,
     on_text: Any | None = None,
     tool_choice: dict[str, Any] | None = None,
+    turn_id: str | None = None,
 ) -> Completion:
-    """Run one model call, recording the route and its cost.
+    """Run one model call, recording the route, its cost and what was exchanged.
 
     MODEL-03: a failure on the configured model retries on the heavy model
     rather than failing the turn. Only the retry's route is reported as the one
@@ -140,6 +213,11 @@ def complete(
     that must call a tool before it may speak is not a coach. Consolidation sets
     it, because CONS-02's "strict JSON" is then a property of the call rather
     than a hope about the prompt.
+
+    `turn_id` (OBS-12) joins the several calls one athlete message can produce
+    into the exchange they belong to. Optional: a scheduled job is a call and
+    not a turn, and giving it an invented id would make the ledger claim a
+    conversation that never happened.
     """
     route = router.route(purpose)
     try:
@@ -155,7 +233,9 @@ def complete(
         completion = _call(client, fallback, system, messages, tools, on_text, tool_choice)
         completion.routed_from = route.model
 
-    _record(conn, completion)
+    completion.turn_id = turn_id
+    call_id = _record(conn, completion)
+    _record_payload(conn, call_id, system, messages, tools, completion)
     return completion
 
 

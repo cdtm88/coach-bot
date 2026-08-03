@@ -158,6 +158,7 @@ src/coach/
     voice.py       the record said in the coach's voice, and the numbers guard
   notify/          P10: the two messages a day the coach sends unasked
     daily.py       what today is (NOTIF-01); one follow-up, never a chase (NOTIF-02)
+    outbox.py      the one door a message he did not ask for goes out through
     charts.py      the images that go with them
   logbook/         P10: a gym session closed from chat alone (LOG-*)
     capture.py     what was lifted, into a session that counts toward load
@@ -167,6 +168,8 @@ src/coach/
     turn.py        one inbound message to one sent reply
     agent.py       the conversational process (coach-agent)
     scheduler.py   the nightly process: consolidation, decay, export (coach-scheduler)
+  observe/         P15: reading a model call back after the fact (OBS-10 to OBS-14)
+    transcript.py  what was sent and what came back, as an exchange (coach-transcript)
 tests/             the acceptance criteria, as assertions
 ```
 

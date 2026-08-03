@@ -30,10 +30,11 @@
 | — | Docker image, compose stack, MEM-12's pg_dump sidecar (PR #18) | merged |
 | — | libpq connection route, for a Postgres deployed separately (PR #19) | merged |
 | — | The four defects that only appear once deployed (PR #20) | merged |
-| — | What three archived attempts were worth: `docs/prior-art.md` (PR #38) | built |
-| — | The outbox: proactive messages were sent and never recorded (PR #38) | built |
+| — | What three archived attempts were worth: `docs/prior-art.md` (PR #38) | merged |
+| — | The outbox: proactive messages were sent and never recorded (PR #38) | merged |
+| P15 | The model call ledger: what was sent, what came back, readable (OBS-10 to OBS-14) | built |
 
-866 tests, all against a real Postgres. Schema is at migration 017; the
+888 tests, all against a real Postgres. Schema is at migration 018; the
 scheduler's own ledger is created on first use rather than as a migration,
 because it is process bookkeeping rather than part of the memory design.
 
@@ -138,6 +139,56 @@ Acceptance, when it is written:
   offset unadvanced for any turn that did not complete.
 - The three console scripts still exist and still work, because running one loop
   alone is how they are debugged.
+
+### P15: reading a turn back
+
+OBS-10 to OBS-14, and built out of phase order on purpose. `model_calls` has
+recorded the shape of every call since P01 and none of its content, so "why did
+the coach say that" had no answer: the system prompt is assembled per turn from
+facts that change nightly and cannot be reconstructed afterwards, and the tool
+results that actually shaped a reply were never stored anywhere at all.
+
+**It cost no new call sites.** Everything hangs off `llm.client.complete`, which
+is already the only place a model is called, so consolidation, the session
+review and the Sunday voicing were covered without being touched. That is the
+same property that made OBS-01 true by construction rather than by discipline,
+used a second time.
+
+**Three decisions worth knowing without reading it.**
+
+`model_call_payloads` is a second table rather than columns on `model_calls`.
+The cost table is on the hot path — `runtime.models.spent_today` sums it before
+every turn — and widening a row scanned by a daily aggregate to carry tens of
+kilobytes of JSON would make the cheapest query in the system the dearest.
+Payloads are also the first thing anyone prunes, and pruning a column means
+rewriting the cost row rather than deleting a different one.
+
+**The payload write is outside the cost row's transaction, and swallows.** A
+call that happened must be billed whether or not a copy of it survived, so
+OBS-01 and OBS-07 cannot be made to depend on OBS-10 succeeding. A `model_calls`
+row with no payload is a normal outcome, and `coach-transcript` says so rather
+than printing an empty prompt — an unrecorded prompt and an empty one are
+different facts.
+
+**`turn_id` is what makes it readable.** One athlete message can produce three
+calls: ask for a tool, ask for another, answer. Before this they were three rows
+with adjacent timestamps and nothing joining them. `runtime.turn.respond` mints
+one because it is the boundary of an exchange, and the naturalness retry belongs
+to the same exchange as the reply it is retrying. Scheduled jobs get none: a job
+is a call and not a conversation, and inventing an id would have the ledger
+claim one that never happened.
+
+`coach-transcript` is the fifth console script and the point of the phase. A
+ledger that needs SQL across two tables and hand-decoded JSON is one nobody
+reads on the day it matters. `--last N` counts *exchanges* rather than rows, so
+a turn that used three tools does not eat the window and no reply is ever
+printed without the question above it.
+
+Retention resolves PRD open item 8, which had been open since the PRD was
+written: 90 days, then pruned nightly, configurable. `model_calls` is never
+pruned. A malformed window falls back to the default rather than being read as
+"prune everything", because a typo that silently emptied the ledger is not a
+failure mode worth having.
 
 ### P10: the coach speaks first
 
@@ -718,6 +769,7 @@ src/coach/health/       P04 and P05: macros, body mass, recovery
 src/coach/calendars/    P06: the iCal feeds and observed availability
 src/coach/blocks/       P07: the constraint gate, the library, load, generation
 src/coach/plans/        P08: publishing upstream, the sweep, athlete edits
+src/coach/observe/      P15: reading a model call back. `coach-transcript`
 
 The README's layout section lists every module with one line on what it is for.
 ```

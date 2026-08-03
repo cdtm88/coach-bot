@@ -213,6 +213,24 @@ If the process is killed mid-ride, queued deliveries survive in the database and
 
 Run all three. Only `coach-ingest` needs the tunnel.
 
+`coach-transcript` is not a process and nothing runs it on a schedule. It reads
+the OBS-10 ledger back: what the model was actually sent and what it actually
+said, grouped into exchanges. Reach for it when the coach says something you did
+not expect, which is the one question the logs could not answer before.
+
+```bash
+coach-transcript                     # the last exchange
+coach-transcript --last 5            # the last five
+coach-transcript --on 2026-08-03     # everything that day, UTC
+coach-transcript --purpose review    # only the Sunday voicings
+coach-transcript --brief             # skip the system blocks
+```
+
+It needs `DATABASE_URL` (or the libpq variables) and nothing else — no API key,
+because it reads history rather than making calls. Payloads are kept for
+`COACH_PAYLOAD_RETENTION_DAYS`, default 90, and pruned on the nightly pass; the
+cost rows behind `model_calls` are never pruned.
+
 #### Under compose
 
 > The exact command sequence for a first deployment, including the backup restore

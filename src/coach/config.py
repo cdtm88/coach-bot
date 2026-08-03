@@ -7,10 +7,13 @@ startup rather than a silent fallback.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from decimal import Decimal
 from zoneinfo import ZoneInfo
+
+log = logging.getLogger(__name__)
 
 # CONS-07: confidence decays toward this floor and never reaches zero.
 CONFIDENCE_FLOOR = Decimal("0.20")
@@ -20,6 +23,16 @@ VERIFICATION_THRESHOLD = Decimal("0.50")
 
 # MEM-11: per turn assembled context ceiling, excluding conversation history.
 CONTEXT_TOKEN_BUDGET = 4000
+
+# OBS-14, and the resolution of open item 8. Raw prompts and replies are kept for
+# this many days and then pruned; `model_calls` itself is never pruned, because
+# OBS-01's cost history is the thing the table exists for.
+#
+# Ninety days is long enough to investigate anything anyone realistically
+# investigates and to build a trust corpus from real conversation, and short
+# enough that MEM-12's nightly pg_dump does not grow without bound carrying a
+# copy of the persona and the fact blocks for every call ever made.
+DEFAULT_PAYLOAD_RETENTION_DAYS = 90
 
 
 class ConfigError(RuntimeError):
@@ -50,6 +63,31 @@ def daily_spend_cap() -> Decimal:
     if cap <= 0:
         raise ConfigError("DAILY_SPEND_CAP_USD must be positive")
     return cap
+
+
+def payload_retention_days() -> int:
+    """OBS-14's window, read on its own for the same reason the cap is.
+
+    A malformed value falls back rather than raising. The cost of the wrong
+    window is payloads kept a bit too long; the cost of refusing to start is the
+    whole nightly pass, and this is the least important job in it.
+
+    Zero or negative is refused rather than treated as "prune everything": a
+    typo that silently deleted the entire ledger is not a failure mode worth
+    having, and turning the ledger off is what not scheduling the job is for.
+    """
+    raw = os.environ.get("COACH_PAYLOAD_RETENTION_DAYS", "").strip()
+    if not raw:
+        return DEFAULT_PAYLOAD_RETENTION_DAYS
+    try:
+        days = int(raw)
+    except ValueError:
+        log.warning("COACH_PAYLOAD_RETENTION_DAYS=%r is not a number; using the default", raw)
+        return DEFAULT_PAYLOAD_RETENTION_DAYS
+    if days < 1:
+        log.warning("COACH_PAYLOAD_RETENTION_DAYS=%d is not positive; using the default", days)
+        return DEFAULT_PAYLOAD_RETENTION_DAYS
+    return days
 
 
 def _database_url() -> str | None:
