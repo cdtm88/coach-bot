@@ -640,6 +640,52 @@ def test_the_calendar_reaches_the_prompt(conn, one_feed) -> None:
     assert "not training sessions" in assembled.render()
 
 
+def test_every_diary_line_carries_its_own_caveat(conn, one_feed) -> None:
+    """The heading and the preamble were not enough, twice.
+
+    On 3 August 2026 the coach quoted "Zwift Ride Test, 16:45 to 17:15" from
+    this block as "today's session", with the heading already renamed, the
+    preamble already present, the TODAY block already carrying the plan and the
+    persona already saying a diary commitment is never a session it set. A model
+    lifts a line, not a block, so the caveat now sits on the line.
+    """
+    feed.sync(
+        conn,
+        DUBAI,
+        TODAY,
+        client=transport(ics(event("e1", stamp(TODAY, 16), stamp(TODAY, 17), "Zwift Ride Test"))),
+    )
+
+    rendered = availability.context(conn, TODAY, DUBAI)
+
+    assert "Zwift Ride Test" in rendered
+    for line in rendered.splitlines():
+        if line.startswith("- "):
+            assert availability.NOT_A_SESSION in line, line
+
+
+def test_an_all_day_entry_is_labelled_too(conn, one_feed) -> None:
+    """The branch a per-line caveat is easiest to miss."""
+    body = ics(
+        "\r\n".join(
+            [
+                "BEGIN:VEVENT",
+                "UID:holiday",
+                f"DTSTART;VALUE=DATE:{TODAY:%Y%m%d}",
+                f"DTEND;VALUE=DATE:{TODAY + timedelta(days=1):%Y%m%d}",
+                "SUMMARY:Flight to London",
+                "END:VEVENT",
+            ]
+        )
+    )
+    feed.sync(conn, DUBAI, TODAY, client=transport(body))
+
+    rendered = availability.context(conn, TODAY, DUBAI)
+
+    assert "Flight to London" in rendered
+    assert availability.NOT_A_SESSION in rendered
+
+
 # --- CHAT-06: the tool ---------------------------------------------------------
 
 

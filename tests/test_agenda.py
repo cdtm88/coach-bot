@@ -357,13 +357,19 @@ def test_the_plan_block_says_the_diary_is_not_it(conn: psycopg.Connection) -> No
 
 
 def test_both_blocks_reach_the_prompt(conn: psycopg.Connection) -> None:
-    """And in that order: the plan before the diary."""
+    """And in that order: the plan before the diary.
+
+    Matched on the headings where they start a line, not on the strings
+    anywhere. WHAT YOU CAN LOOK UP names both blocks in prose so the coach knows
+    which tool serves which, and a bare substring search finds those mentions
+    first and reads them as the blocks themselves.
+    """
     busy(conn, "Zwift Ride Test")
     write(conn)
 
     rendered = prompt.assemble(conn, MORNING, tz=DUBAI).render()
 
-    assert rendered.index("TODAY") < rendered.index("HIS DIARY")
+    assert rendered.index("\nTODAY\n") < rendered.index("\nHIS DIARY\n")
     assert "Base endurance" in rendered
 
 

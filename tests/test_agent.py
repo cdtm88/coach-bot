@@ -120,6 +120,60 @@ def test_fresh_feed_produces_no_staleness_block(conn: psycopg.Connection) -> Non
     assert prompt.render_staleness(conn, NOW) == ""
 
 
+# --- the prompt describes the system, not only the athlete --------------------
+#
+# On 3 August 2026 the coach told the athlete "calendar and activities feeds have
+# never returned successfully for this account" and made no tool call in three
+# turns. Every feed had returned successfully that hour, and eleven tools were
+# offered. Nothing in the prompt had ever said what the system could reach, so
+# the model inferred it from the absence of ride data in its context.
+
+
+def test_the_prompt_says_what_the_coach_can_look_up(conn: psycopg.Connection) -> None:
+    assembled = prompt.assemble(conn, NOW, tz=DUBAI_TZ)
+    rendered = assembled.render()
+
+    assert "capabilities" in assembled.names()
+    assert "get_sessions" in rendered
+    assert "get_plan" in rendered
+
+
+def test_the_prompt_forbids_claiming_a_limit_before_looking(
+    conn: psycopg.Connection,
+) -> None:
+    """The rule the whole block exists for.
+
+    A model with a strong prohibition and no orientation invents; here it
+    invented a limitation rather than a figure, which a scanner watching for
+    fabricated watts would never see.
+    """
+    rendered = prompt.render_capabilities()
+
+    assert "until you have called the tool" in rendered
+    assert "log_capability_gap" in rendered, "TRUST-05's escape hatch, or it is a bare prohibition"
+
+
+def test_the_capability_block_is_cached_with_the_persona(
+    conn: psycopg.Connection,
+) -> None:
+    """It describes the system, which changes with the code and not the athlete.
+
+    Asserted against the cache breakpoint rather than the block list, because a
+    block that lands after it re-bills the whole prefix every turn.
+    """
+    blocks = prompt.as_system_blocks(prompt.assemble(conn, NOW, tz=DUBAI_TZ))
+
+    stable = [b for b in blocks if b.get("cache_control")]
+    assert len(stable) == 1
+    assert "WHAT YOU CAN LOOK UP" in stable[0]["text"]
+
+
+def test_the_capability_block_needs_no_database(conn: psycopg.Connection) -> None:
+    """Static by design: a prompt block that cannot fail is one that cannot go
+    missing on the turn it is most needed."""
+    assert "get_sessions" in prompt.render_capabilities()
+
+
 # --- CHAT-11: one interruption per conversation ----------------------------
 
 
