@@ -47,6 +47,23 @@ class NotAnActivityFile(UnparseableActivity):
     """
 
 
+class AbandonedActivity(UnparseableActivity):
+    """An activity file describing a session that never ran.
+
+    Zwift writes one of these every time a ride is started and immediately
+    ended: a complete, valid, ~1.5 KB activity file whose session records no
+    elapsed time, no distance and no power. Two were sitting in the deployment's
+    watched folder, and the real rides for both days are separate files — one of
+    them written seven seconds later.
+
+    Distinct from a ride whose samples were lost, which this path must record
+    rather than drop (migration 015). Recording *this* would be the mirror
+    error: a `data_unavailable` row asserting the athlete trained, on a day he
+    has already been credited for, which then suppresses FIT-12's missed check
+    for that day.
+    """
+
+
 @dataclass
 class Parsed:
     """Values computed from samples. Never populated from an `icu_` field."""
@@ -199,8 +216,8 @@ def from_fit(data: bytes) -> Parsed:
     sport: str | None = None
     sub_sport: str | None = None
     file_type: str | None = None
-    time_created: datetime | None = None
     session_start: datetime | None = None
+    session_seconds: float | None = None
 
     def _aware(raw: object) -> datetime | None:
         if not isinstance(raw, datetime):
@@ -224,17 +241,24 @@ def from_fit(data: bytes) -> Parsed:
                     sport = sport or _enum_name(value("sport"))
                     sub_sport = sub_sport or _enum_name(value("sub_sport"))
 
-                # Read for the sake of a file with no records at all. Every
-                # device writes `file_id`, and it is the only message that says
-                # what kind of file this is; `session.start_time` is the ride's
-                # own start where the records that would have carried it are
-                # gone. Both are the file's statement about itself and neither
-                # is an aggregate, so FIT-03 is untouched — see `_no_samples`.
+                # Read for the sake of a file with no records at all. `file_id`
+                # is the only message that says what kind of file this is, and
+                # `session` is what says whether a ride happened and when. Used
+                # to decide *existence*, never to fill a column — see
+                # `_no_samples`, where FIT-03 is argued in full.
+                #
+                # `file_id.time_created` is deliberately not read. It says a
+                # file was made, which is not the same claim, and on the live
+                # deployment the difference is the whole question: Zwift stamps
+                # it on abandoned starts too.
                 if frame.name == "file_id":
                     file_type = file_type or _enum_name(value("type"))
-                    time_created = time_created or _aware(value("time_created"))
                 if frame.name == "session":
                     session_start = session_start or _aware(value("start_time"))
+                    if session_seconds is None:
+                        raw = value("total_timer_time")
+                        raw = value("total_elapsed_time") if raw is None else raw
+                        session_seconds = float(raw) if isinstance(raw, int | float) else None
 
                 if frame.name != "record":
                     continue
@@ -264,7 +288,7 @@ def from_fit(data: bytes) -> Parsed:
         raise UnparseableActivity(f"not a readable FIT file: {exc}") from exc
 
     if not (power or hr or cadence or started_at):
-        return _no_samples(file_type, session_start or time_created, sport, sub_sport)
+        return _no_samples(file_type, session_start, session_seconds, sport, sub_sport)
 
     duration = None
     if started_at and last_timestamp:
@@ -286,40 +310,71 @@ def from_fit(data: bytes) -> Parsed:
 
 def _no_samples(
     file_type: str | None,
-    when: datetime | None,
+    session_start: datetime | None,
+    session_seconds: float | None,
     sport: str | None,
     sub_sport: str | None,
 ) -> Parsed:
-    """A FIT file with no record messages, and which of three things that means.
+    """A FIT file with no record messages, and which of four things that means.
+
+    The distinction that matters is not "can this be read" but **did an activity
+    happen**, and a file with no samples can answer that either way.
 
     *Not an activity at all.* A settings, workout or course file, which a device
     or a sync tool will happily leave in the same folder. Nothing to ingest and
-    nothing wrong; :class:`NotAnActivityFile` says so distinctly.
+    nothing wrong; :class:`NotAnActivityFile`.
 
-    *An activity whose samples did not survive.* Zwift and Garmin both write the
-    header and the session summary before the record stream is flushed, so a
-    crash or a pulled cable leaves a file that says a ride happened, when, and
-    what kind, and nothing else. Migration 015 settled what to do with exactly
-    this shape of evidence and settled it the other way from how this path used
-    to behave: **the row stays and says what it is.** Dropping it is what turns
-    a session the athlete did into a session FIT-12 reports he skipped.
+    *An activity that never ran.* Zwift writes a complete 1.5 KB activity file
+    every time a ride is started and abandoned: `file_id.type` is `activity`,
+    there is a `session` and a `lap` and an `activity` message, and every number
+    in them is zero. On the live deployment the file at 21 July 13:02:17 is one
+    of these and the real ride begins **seven seconds later** in its own file.
+    :class:`AbandonedActivity`, because recording it would claim the athlete
+    trained on a day he is already correctly credited for — and worse, a
+    `data_unavailable` row suppresses FIT-12's missed check for that day.
 
-    So this returns a Parsed carrying the start time and nothing else, flagged
-    `samples_missing`. FIT-10 is satisfied because the time is the file's own
-    and not the ingest clock. FIT-03 is satisfied by omission: `session` also
-    holds the device's total elapsed time and average power, and none of it is
-    read, because a `data_unavailable` session's contract with the weekly review
-    is that its time and distance are *missing* rather than sourced elsewhere.
+    Told apart by the session's own account of itself rather than by size or
+    filename: it names no `start_time` and declares no elapsed time. A ride
+    whose samples were lost mid-write still has both.
 
-    *Neither.* No records and no time anywhere, so there is nothing to date it
-    by and FIT-10 forbids inventing one. Unparseable, as before.
+    *An activity whose samples did not survive.* The case migration 015 settled
+    and settled the other way from how this path used to behave: **the row stays
+    and says what it is**, because dropping it is what turns a session the
+    athlete did into one FIT-12 reports he skipped. Returns a Parsed carrying
+    the start time and nothing else, flagged `samples_missing`.
+
+    FIT-10 is satisfied because the time is the session's own and not the ingest
+    clock. FIT-03 is satisfied by omission: `session` also holds total elapsed
+    time, distance and average power, and none of it reaches a column, because a
+    `data_unavailable` session's contract with the weekly review is that its
+    time and distance are *missing* rather than sourced elsewhere. Reading the
+    duration to decide whether a ride occurred is a different act from storing
+    it as the ride's duration, and only the second is what FIT-03 forbids.
+
+    *Neither.* No records, and no session naming when it began. Nothing to date
+    it by, and FIT-10 forbids inventing one.
     """
     if file_type is not None and file_type != "activity":
         raise NotAnActivityFile(f"a FIT {file_type} file, which is not an activity")
-    if when is None:
-        raise UnparseableActivity("FIT file contained no record messages")
 
-    parsed = Parsed(started_at=when, source_kind="fit", samples_missing=True, file_type=file_type)
+    # Zero is the file stating outright that the ride lasted no time — the
+    # positive claim, so it is tested first. Zwift's stub omits `start_time`
+    # *as well*, and answering "undateable" for it would be true but useless:
+    # the file is not a ride we failed to place, it is a ride that never ran.
+    #
+    # None is a device that did not say, which is unknown rather than zero and
+    # disqualifies nothing. Do not scale a null.
+    if session_seconds is not None and session_seconds <= 0:
+        raise AbandonedActivity("a session recording no elapsed time; a start that was abandoned")
+
+    # No session message at all, or one that never says when it began. Nothing
+    # here is evidence that an activity happened, only that a file exists.
+    if session_start is None:
+        raise UnparseableActivity("FIT file contained no record messages and no session start")
+
+    parsed = Parsed(
+        started_at=session_start, source_kind="fit", samples_missing=True, file_type=file_type
+    )
     parsed.sport, parsed.sub_sport = sport, sub_sport
     parsed.warnings.append("no record messages; the activity is dated but has no samples")
     return parsed

@@ -72,6 +72,44 @@ def build_fit(
     return bytes(builder.build().to_bytes())
 
 
+def build_abandoned_fit(created: datetime, sport: str = "CYCLING") -> bytes:
+    """Zwift's abandoned start, field for field as it writes one.
+
+    A complete and valid activity file: `file_id.type` is `activity`, there is a
+    session, and every number in it is zero. `start_time` is absent entirely.
+    Two of these were sitting in the deployment's watched folder — the one dated
+    21 July 13:02:17 is followed by the real ride seven seconds later.
+
+    Built from the real thing rather than from what the parser happens to check,
+    which is the difference between a fixture and a restatement of the code.
+    """
+    from fit_tool.fit_file_builder import FitFileBuilder
+    from fit_tool.profile.messages.file_id_message import FileIdMessage
+    from fit_tool.profile.messages.session_message import SessionMessage
+    from fit_tool.profile.profile_type import FileType, Sport, SubSport
+
+    builder = FitFileBuilder(auto_define=True)
+
+    ident = FileIdMessage()
+    ident.type = FileType.ACTIVITY
+    ident.time_created = int(created.timestamp() * 1000)
+    builder.add(ident)
+
+    session = SessionMessage()
+    # start_time is left unset, which is what Zwift does and what says the ride
+    # never began. total_elapsed_time is 1.0 in the real files and the timer is
+    # 0.0; both are reproduced because the parser reads the timer first.
+    session.total_elapsed_time = 1.0
+    session.total_timer_time = 0.0
+    session.total_distance = 0.0
+    session.avg_power = 0
+    session.sport = Sport[sport.upper()]
+    session.sub_sport = SubSport.VIRTUAL_ACTIVITY
+    builder.add(session)
+
+    return bytes(builder.build().to_bytes())
+
+
 def build_recordless_fit(
     start: datetime | None = None,
     file_type: str = "ACTIVITY",
@@ -79,6 +117,7 @@ def build_recordless_fit(
     sub_sport: str | None = None,
     with_file_id: bool = True,
     with_session: bool = True,
+    timer_seconds: float | None = 3600.0,
 ) -> bytes:
     """A FIT file with a header and a summary but no record stream.
 
@@ -112,8 +151,12 @@ def build_recordless_fit(
         session.start_time = stamp
         # The device's own totals. Written because a real file has them, and
         # asserted nowhere in the session row: FIT-03 and the `data_unavailable`
-        # contract both say these must not be read.
-        session.total_elapsed_time = 3600
+        # contract both say these must not reach a column. The timer *is* read,
+        # to decide whether a ride happened at all — and `None` omits both
+        # fields, for the writer that never states a duration.
+        if timer_seconds is not None:
+            session.total_elapsed_time = timer_seconds
+            session.total_timer_time = timer_seconds
         if sport is not None:
             session.sport = Sport[sport.upper()]
             if sub_sport is not None:

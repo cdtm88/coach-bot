@@ -9,8 +9,8 @@
 -- the folder every poll and `ingest_file` re-reads, re-parses and re-fails on a
 -- file whose bytes cannot change, logging the same warning each pass — on the
 -- live deployment, two files doing this indefinitely since 12 and 21 July 2026.
--- A warning that repeats forever is one nobody reads, which is how two absent
--- rides looked like two rest days.
+-- A warning that repeats forever is one nobody reads, and reading it is what
+-- would have shown that neither file was a ride at all.
 --
 -- Deliberately not a boolean. The reason is the operative fact: a settings file
 -- is a non-event, a truncated ride is a ride that needs recovering from the

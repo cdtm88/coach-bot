@@ -202,10 +202,12 @@ def ingest_file(
 
     try:
         parsed = parse.from_fit(payload)
-    except parse.NotAnActivityFile as exc:
-        # Not a fault. A device or sync tool put a settings or workout file in
-        # the folder; there was never a session in it to miss.
-        log.info("%s is not an activity file (%s); it will not be read again", path, exc)
+    except (parse.NotAnActivityFile, parse.AbandonedActivity) as exc:
+        # Not a fault, and not a missing ride. Either the folder holds something
+        # that was never an activity, or it holds a start the athlete abandoned
+        # — Zwift writes a complete file for those. Nothing happened, so nothing
+        # is recorded beyond the note saying we looked.
+        log.info("%s records no activity (%s); it will not be read again", path, exc)
         mark_unreadable(conn, discovered.sha256, str(exc))
         return None
     except parse.UnparseableActivity as exc:
