@@ -19,6 +19,7 @@ first in a new session.
 | [`docs/deploy.md`](docs/deploy.md) | The command sequence for a first deployment, and how to verify the backup |
 | [`docs/intervals-api.md`](docs/intervals-api.md) | What the intervals.icu API actually does, verified, with dates |
 | [`docs/prd-review.md`](docs/prd-review.md) | Record of the v2.1 review and what it changed |
+| [`docs/prior-art.md`](docs/prior-art.md) | The three archived predecessors: what was taken from them, and the traps they paid for |
 | [`docs/seed/`](docs/seed/) | The source coaching conversation. The audit trail for every seeded fact and for the persona's voice |
 
 On conflict: the design wins on schema and memory semantics, the PRD wins on
