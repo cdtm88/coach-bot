@@ -242,6 +242,21 @@ def observe(
     return queued
 
 
+# The heading said THE WEEK AHEAD, and the coach read it as the training week
+# ahead. It is the athlete's own diary: meetings, travel, and anything else he
+# put in his calendar, including entries whose names sound exactly like
+# sessions. Asked what session was on, the coach answered "Zwift Ride Test,
+# 16:45 to 17:15" out of this block, because nothing else in the prompt was
+# shaped like a schedule. The TODAY block now carries the plan and this says
+# what it is instead of leaving it to be inferred from a heading.
+HEADING = "HIS DIARY"
+PREAMBLE = (
+    "Commitments from his own calendar feeds. These are not training sessions and "
+    "none of them was prescribed by you, whatever they are named. They are what he "
+    "is busy doing."
+)
+
+
 def context(conn: psycopg.Connection, today: date, tz: ZoneInfo, days: int = 7) -> str:
     """The week ahead, as the feed showed it. CALR-05 is the last line.
 
@@ -257,13 +272,14 @@ def context(conn: psycopg.Connection, today: date, tz: ZoneInfo, days: int = 7) 
             if not cur.fetchone()["n"]:
                 return ""
         return (
-            "THE WEEK AHEAD\n"
+            f"{HEADING}\n"
+            f"{PREAMBLE}\n"
             "Nothing on the calendar for the next week. The feed publishes on a cache, "
             "so treat that as what it showed rather than as a clear diary, and confirm "
             "before planning around it."
         )
 
-    lines = ["THE WEEK AHEAD"]
+    lines = [HEADING, PREAMBLE]
     for block in blocks[:20]:
         when = block.local_date.strftime("%a %d %b")
         if block.all_day:

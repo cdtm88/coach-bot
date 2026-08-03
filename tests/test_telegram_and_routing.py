@@ -166,6 +166,25 @@ def test_model_choice_is_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
     assert router.route("chat").model == "claude-haiku-4-5"
 
 
+def test_effort_is_configurable_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half of MODEL-02, which was hard-coded.
+
+    Raising `MODEL_CHAT` to a heavier model while effort stayed at "low" is a
+    change an operator makes, does not feel, and cannot easily debug: the model
+    is the ceiling and the effort is what it is allowed to use.
+    """
+    monkeypatch.setenv("EFFORT_CHAT", "high")
+    assert router.route("chat").effort == "high"
+
+
+def test_a_bad_effort_setting_falls_back_rather_than_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A typo must cost a worse answer, never the reply."""
+    monkeypatch.setenv("EFFORT_CHAT", "maximum")
+    assert router.route("chat").effort == "low"
+
+
 def test_unknown_purpose_is_rejected() -> None:
     with pytest.raises(router.UnknownPurpose):
         router.route("vibes")

@@ -19,12 +19,15 @@ from psycopg.types.json import Jsonb
 
 from coach import clock
 from coach.blocks import document as blockmod
+from coach.blocks import load as loadmod
 from coach.calendars import availability as calmod
 from coach.health import breaks as breakmod
 from coach.logbook import capture as capturemod
 from coach.memory import facts as factmod
 from coach.memory import notes as notemod
 from coach.memory import state as statemod
+from coach.plans import agenda as agendamod
+from coach.plans import events as eventmod
 
 # Phase that lands each deferred tool, surfaced in its unavailable result.
 DEFERRED: dict[str, str] = {}
@@ -181,11 +184,36 @@ SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        # The surface could write a prescription and never read one. Everything
+        # the coach knew about the plan came from whatever it had just written
+        # in the same turn, which is to say nothing, one turn later.
+        "name": "get_plan",
+        "description": (
+            "What is prescribed over a date range: the session, its duration, its "
+            "target, its purpose, and whether it has been done. This is the training "
+            "plan. Use it before answering anything about what he is meant to be "
+            "doing. Do not answer that from the calendar feeds, which are his own "
+            "diary."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "since": {"type": "string", "format": "date"},
+                "until": {"type": "string", "format": "date"},
+            },
+            "required": ["since", "until"],
+        },
+    },
+    {
         "name": "write_session_events",
         "description": (
             "Publish or update planned workouts on the training calendar. Every "
             "event carries a stable coach id so a change updates rather than "
-            "duplicates."
+            "duplicates. A session written here is what he will see on the "
+            "calendar and what he will actually do, so give it the same detail "
+            "you would give him in a message: how long, how hard, and what it is "
+            "for. A session with no duration and no purpose publishes as an empty "
+            "block on his calendar and is rejected."
         ),
         "input_schema": {
             "type": "object",
@@ -195,12 +223,56 @@ SCHEMAS: list[dict[str, Any]] = [
                     "items": {
                         "type": "object",
                         "properties": {
-                            "coach_id": {"type": "string"},
-                            "planned_for": {"type": "string", "format": "date-time"},
-                            "discipline": {"type": "string"},
-                            "spec": {"type": "object"},
+                            "planned_for": {
+                                "type": "string",
+                                "format": "date-time",
+                                "description": "Local start time, ISO 8601.",
+                            },
+                            "discipline": {
+                                "type": "string",
+                                "enum": list(eventmod.DISCIPLINES),
+                                "description": (
+                                    "Use 'ride' for outdoor cycling and 'virtualride' "
+                                    "for Zwift and the turbo. 'cycling' is not a "
+                                    "discipline the calendar understands."
+                                ),
+                            },
+                            # Spelled out rather than left as a free-form object.
+                            # An unconstrained `spec` is what put empty sessions on
+                            # his calendar: the model had nothing telling it what
+                            # the field was for, and nothing checked what arrived.
+                            "spec": {
+                                "type": "object",
+                                "properties": {
+                                    "duration_s": {
+                                        "type": "integer",
+                                        "description": "Planned duration in seconds. Required.",
+                                    },
+                                    "purpose": {
+                                        "type": "string",
+                                        "description": (
+                                            "What the session is for, in his words. "
+                                            "'Base endurance, conversational' rather "
+                                            "than 'Z2'. Required."
+                                        ),
+                                    },
+                                    "target_watts": {"type": "integer"},
+                                    "intensity_factor": {"type": "number"},
+                                    "ftp_watts": {"type": "integer"},
+                                    "rpe_target": {"type": "number"},
+                                    "route": {"type": "string"},
+                                    "movements": {
+                                        "type": "array",
+                                        "description": (
+                                            "Gym only. Each needs sets, reps and an RPE."
+                                        ),
+                                        "items": {"type": "object"},
+                                    },
+                                },
+                                "required": ["duration_s", "purpose"],
+                            },
                         },
-                        "required": ["coach_id", "planned_for", "discipline", "spec"],
+                        "required": ["planned_for", "discipline", "spec"],
                     },
                 }
             },
@@ -230,6 +302,78 @@ def _serialise(value: Any) -> Any:
     if isinstance(value, datetime | date):
         return value.isoformat()
     return value
+
+
+def _planned_at(raw: str) -> datetime:
+    """TZ-01: a wall clock time the model wrote is the athlete's wall clock.
+
+    `datetime.fromisoformat` returns a naive value for the ISO strings a model
+    actually produces, and `planned_for` is `timestamptz`. Handing Postgres a
+    naive value has it read in the session zone, which is UTC — so "18:00" was
+    stored as 18:00 UTC and came back as 22:00 in Dubai. Every session this tool
+    wrote sat four hours late, on the calendar and in the morning message.
+
+    `blocks.generate` never had the bug because it builds its own timestamp with
+    `tzinfo=tz`. This is the same convention, applied at the other door.
+    """
+    moment = datetime.fromisoformat(raw)
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=clock.configured_tz())
+    return moment
+
+
+def _reject_specs(events: list[dict[str, Any]]) -> list[str]:
+    """BLOCK-04, on the path that was not checking it.
+
+    `blocks.generate.validate` has enforced this since P07: a published session
+    carries a duration, an intensity target and a purpose, and a generation that
+    cannot produce them is rejected rather than written. `write_session_events`
+    is the *other* way a prescription is created, it never had the check, and
+    the difference was visible on the athlete's calendar — three entries reading
+    only "cycling", no duration, no target, and a week showing zero load.
+
+    The schema now asks for these too. Both, deliberately: a schema is a request
+    the model usually honours and this is a check it cannot route around, and
+    the failure mode here writes to the athlete's real calendar.
+
+    Reasons rather than an exception, and every reason rather than the first,
+    because the caller is a model that will fix exactly what it is told about.
+    """
+    reasons: list[str] = []
+    for index, event in enumerate(events):
+        where = str(event.get("planned_for") or f"event {index + 1}")
+        spec = event.get("spec")
+        if not isinstance(spec, dict):
+            reasons.append(f"{where}: spec must be an object with duration_s and purpose")
+            continue
+
+        if not spec.get("duration_s"):
+            reasons.append(f"{where}: duration_s is missing (BLOCK-04)")
+        if not str(spec.get("purpose") or "").strip():
+            reasons.append(f"{where}: purpose is missing (BLOCK-04)")
+
+        discipline = eventmod.canonical(event.get("discipline") or "")
+        if discipline not in eventmod.TYPES:
+            reasons.append(
+                f"{where}: {event.get('discipline')!r} is not a discipline the calendar "
+                f"understands. Use one of {', '.join(eventmod.DISCIPLINES)}."
+            )
+        elif discipline in loadmod.GYM_DISCIPLINES:
+            # GYM-01. The movements are the session: a gym entry without them is
+            # a block of time he cannot act on.
+            for movement in spec.get("movements") or []:
+                if not all(movement.get(f) for f in ("sets", "reps", "rpe_target")):
+                    name = movement.get("name") or movement.get("exercise") or "movement"
+                    reasons.append(f"{where}: {name} needs sets, reps and an RPE target (GYM-01)")
+        elif not (spec.get("intensity_factor") or spec.get("target_watts")):
+            # BLOCK-04's intensity target. Gym states it as RPE per movement,
+            # which the branch above covers; everything else needs a number the
+            # session can be ridden to.
+            reasons.append(
+                f"{where}: needs an intensity target, either intensity_factor or "
+                "target_watts (BLOCK-04)"
+            )
+    return reasons
 
 
 def dispatch(conn: psycopg.Connection, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -383,6 +527,32 @@ def dispatch(conn: psycopg.Connection, name: str, arguments: dict[str, Any]) -> 
             "caveat": "Individual rows. Totals come from the rollups already in context.",
         }
 
+    if name == "get_plan":
+        scheduled = agendamod.between(
+            conn,
+            date.fromisoformat(arguments["since"]),
+            date.fromisoformat(arguments["until"]),
+        )
+        return {
+            "prescribed": [
+                {
+                    "id": s.id,
+                    "planned_for": _serialise(s.planned_for),
+                    "discipline": s.discipline,
+                    "duration_min": s.minutes or None,
+                    "spec": s.spec,
+                    "status": s.status,
+                    "described": s.describe(),
+                    "activity_landed_that_day": s.done,
+                }
+                for s in scheduled
+            ],
+            "caveat": (
+                "This is the plan. The calendar feeds are his own commitments and are "
+                "a different thing."
+            ),
+        }
+
     if name == "write_session_events":
         # PLAN-01, written locally and published by the scheduler rather than
         # from inside the turn. The same reasoning as LOG-08: a conversation
@@ -392,17 +562,37 @@ def dispatch(conn: psycopg.Connection, name: str, arguments: dict[str, Any]) -> 
         if block is None:
             return {"available": False, "reason": "there is no active training block yet"}
 
+        events = list(arguments["events"])
+        rejected = _reject_specs(events)
+        if rejected:
+            # Nothing is written when anything is wrong. A partial write leaves
+            # him with some sessions on the calendar and some not, and no way to
+            # tell which from looking at it.
+            return {
+                "written": 0,
+                "rejected": rejected,
+                "reason": "No sessions were written. Fix these and call again.",
+            }
+
         written = []
         with conn.transaction(), conn.cursor() as cur:
-            for event in arguments["events"]:
+            for event in events:
+                discipline = eventmod.canonical(event["discipline"])
+                spec = dict(event["spec"])
                 cur.execute(
                     "insert into prescriptions (block_id, planned_for, discipline, spec, "
-                    "status) values (%s, %s, %s, %s, 'planned') returning id",
+                    "planned_load, status) values (%s, %s, %s, %s, %s, 'planned') returning id",
                     (
                         block.id,
-                        datetime.fromisoformat(event["planned_for"]),
-                        event["discipline"],
-                        Jsonb(event["spec"]),
+                        _planned_at(event["planned_for"]),
+                        discipline,
+                        Jsonb(spec),
+                        # Computed here, not left null. BLOCK-07's ramp check and
+                        # GYM-05's ceiling both read this column, so a session
+                        # written without it is a session the coach's own load
+                        # limits cannot see — it costs nothing on paper and the
+                        # platform shows the week as zero load.
+                        loadmod.of_spec(discipline, spec),
                     ),
                 )
                 written.append(int(cur.fetchone()["id"]))
