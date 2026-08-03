@@ -94,9 +94,15 @@ re-request before concluding anything about CI.
 **Do not give a deployment instruction in its checkout form.** The console
 scripts live in the image's virtualenv and the data lives in the deployment, so
 `coach-transcript` on the host is `command not found` — which reads as a broken
-install rather than a command in the wrong place. There are also two compose
-projects on that box, and the database one answers `docker compose build`
-happily while building nothing. `docs/deploy-existing-postgres.md` has both.
+install rather than a command in the wrong place.
+
+**Three directories on that box have a `docker-compose.yml`** and each fails
+differently: the checkout errors on a missing `COACH_TZ` and reads as a broken
+`.env`, the database project answers `docker compose build` happily while
+building nothing, and only the application project works. A multi-step
+deployment instruction carries its own `cd` — `git pull` leaves you in the
+checkout, which is the one that bit twice.
+`docs/deploy-existing-postgres.md` has the table.
 
 ## Verifying
 

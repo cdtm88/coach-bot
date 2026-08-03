@@ -7,32 +7,48 @@ against the Unraid handover of 2 August 2026 and kept general where it can be.
 Nothing here modifies the database service, its init scripts, or its backup
 sidecar. The application adapts to what is there.
 
-## Two compose projects, and knowing which one you are in
+## Three directories with a compose file, and knowing which one you are in
 
-This is the first thing to get right and it cost an hour on 3 August 2026,
-because every command below is silently wrong in the other directory.
+This is the first thing to get right. It cost an hour on 3 August 2026 and then
+cost a second deploy the same evening, because every command below fails
+differently in each of the other two and none of the failures says "wrong
+directory".
 
 The database and the application are **separate compose projects**. That is the
 consequence of the paragraph above rather than an oddity: the database was
 already deployed with its own conventions, so the application was added beside
-it instead of absorbing it.
+it instead of absorbing it. The third is the checkout, which is not a project
+you deploy from but **does contain a `docker-compose.yml`** — the repository
+ships one, and running compose there is the easy mistake because it is where
+`git pull` leaves you.
 
-| Project | Where, on the Unraid box | Services |
+| Directory | Where, on the Unraid box | What compose finds there |
 | --- | --- | --- |
+| The application | `/boot/config/plugins/compose.manager/projects/coach-bot` | `migrate`, `coach-agent`, `coach-ingest`, `coach-scheduler` — **this is the one** |
 | The database | `/mnt/cache/appdata/coach-bot` | `postgres`, `backup` |
-| The application | `/boot/config/plugins/compose.manager/projects/coach-bot` | `migrate`, `coach-agent`, `coach-ingest`, `coach-scheduler` |
-| The source it builds from | `/mnt/cache/appdata/coach-bot/src` | not a compose project; `build.context` points here |
+| The source it builds from | `/mnt/cache/appdata/coach-bot/src` | the repository's own bundled `docker-compose.yml`, which expects a `.env` that is not there |
 
 Every `docker compose` command in this document is run from the **application**
-project. Running them one directory up finds the database project instead, where
-`docker compose build` succeeds while building nothing and `up -d migrate` says
-`no such service: migrate`. Both look like a broken deployment and neither is.
-
-Confirm where you are before anything else:
+project. Confirm it before anything else — one command, and it names the
+directory you are in:
 
 ```bash
 docker compose config --services      # expect migrate, coach-agent, coach-ingest, coach-scheduler
 ```
+
+If it errors or lists `postgres`, you are not in the application project. Read
+the failure rather than the exit code, because each one has its own disguise:
+
+| Where you actually are | What you get |
+| --- | --- |
+| The source checkout | `error while interpolating x-app.environment.COACH_TZ: required variable COACH_TZ is missing`, alongside a `POSTGRES_PASSWORD is not set` warning. Reads as a broken `.env`; the `.env` is fine and lives with the application project. |
+| The database project | `no such service: migrate`, and `docker compose build` **succeeds while building nothing**. Reads as a broken deployment. |
+| The application project | The services above, and everything works. |
+
+The checkout's failure is the safest of the three, because compose refuses
+before doing anything. The database project's is the dangerous one: a build that
+succeeds and produces no image is indistinguishable from a build that worked,
+until a new console script reports `command not found`.
 
 The paths above are this deployment's. On another box, find them with
 `grep -A2 -i 'build:' docker-compose.yml` from the application project, which
@@ -365,7 +381,7 @@ writes a `facts-*.md` into it, which is why the existing retention is scoped to
 
 ## Bring it up
 
-From the application project. See "Two compose projects" above if that is not
+From the application project. See "Three directories with a compose file" above if that is not
 already obvious.
 
 ```bash
@@ -404,9 +420,14 @@ git pull
 git --no-pager log --oneline -1          # confirm it moved
 ```
 
-Then, back in the application project:
+Then **change directory back**. This is a step and not a transition: `git pull`
+leaves you in the checkout, the checkout has a `docker-compose.yml` of its own,
+and compose run there fails on a missing `COACH_TZ` rather than on being in the
+wrong place. The `cd` is part of the sequence for that reason.
 
 ```bash
+cd /boot/config/plugins/compose.manager/projects/coach-bot
+docker compose config --services         # migrate, coach-agent, coach-ingest, coach-scheduler
 docker compose build
 docker compose up -d migrate
 docker compose logs migrate              # read it; see "Bring it up" above
