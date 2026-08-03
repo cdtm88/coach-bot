@@ -27,6 +27,22 @@ already past, because `poll` only considers sessions with `reviewed_at is null`
 and every affected session was reviewed. Dry run by default; `--apply` writes.
 Deletable once it has been run.
 
+**How large the backlog turned out to be: none.** Run against the live stack the
+same day, it reported nothing to reconcile, and the database agreed — three
+prescriptions had ever existed, two of them for future days and the third
+already closed. The defect was real and the reasoning about it holds, but its
+practical blast radius here was nil, because the coach had barely begun writing
+prescriptions. Recorded because the opposite impression is easy to take from the
+sections above, and because the reconciliation earning nothing is what made that
+knowable rather than assumed.
+
+The third prescription is the more interesting half. It was closed by the *fixed*
+ingest path minutes after the deploy, on the athlete's ride that morning:
+`source: intervals`, a `virtualride` matched to a prescription recorded as
+`cycling`, which is `review.equivalents` doing the job an exact comparison would
+have failed. First time a ride on this deployment had ever closed its own
+prescription.
+
 ## Eliminated
 
 - **The matcher is too strict.** The obvious first theory, and it has a real

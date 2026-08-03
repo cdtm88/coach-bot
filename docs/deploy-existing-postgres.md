@@ -7,6 +7,37 @@ against the Unraid handover of 2 August 2026 and kept general where it can be.
 Nothing here modifies the database service, its init scripts, or its backup
 sidecar. The application adapts to what is there.
 
+## Two compose projects, and knowing which one you are in
+
+This is the first thing to get right and it cost an hour on 3 August 2026,
+because every command below is silently wrong in the other directory.
+
+The database and the application are **separate compose projects**. That is the
+consequence of the paragraph above rather than an oddity: the database was
+already deployed with its own conventions, so the application was added beside
+it instead of absorbing it.
+
+| Project | Where, on the Unraid box | Services |
+| --- | --- | --- |
+| The database | `/mnt/cache/appdata/coach-bot` | `postgres`, `backup` |
+| The application | `/boot/config/plugins/compose.manager/projects/coach-bot` | `migrate`, `coach-agent`, `coach-ingest`, `coach-scheduler` |
+| The source it builds from | `/mnt/cache/appdata/coach-bot/src` | not a compose project; `build.context` points here |
+
+Every `docker compose` command in this document is run from the **application**
+project. Running them one directory up finds the database project instead, where
+`docker compose build` succeeds while building nothing and `up -d migrate` says
+`no such service: migrate`. Both look like a broken deployment and neither is.
+
+Confirm where you are before anything else:
+
+```bash
+docker compose config --services      # expect migrate, coach-agent, coach-ingest, coach-scheduler
+```
+
+The paths above are this deployment's. On another box, find them with
+`grep -A2 -i 'build:' docker-compose.yml` from the application project, which
+prints the `context:` the image is built from.
+
 ## What had to change in the application, and why
 
 **`DATABASE_URL` is no longer required.** It is still honoured and still what the
@@ -334,11 +365,22 @@ writes a `facts-*.md` into it, which is why the existing retention is scoped to
 
 ## Bring it up
 
+From the application project. See "Two compose projects" above if that is not
+already obvious.
+
 ```bash
 docker compose up -d migrate
-docker compose logs migrate            # 13 migrations, then exit 0
+docker compose logs migrate            # applies each .sql, then exits 0
 docker compose up -d coach-agent coach-ingest coach-scheduler
 ```
+
+`migrate` names every file it applies and finishes with `applied N migration(s)`
+or `schema up to date`. Read it rather than trusting the exit: a fast exit looks
+identical whether it applied three migrations or found none to apply, and
+starting the other three against a half-migrated schema is what PR #20 had to
+fix. The count is whatever `ls migrations/*.sql | wc -l` says; it is not quoted
+here because a number in a document is a number that goes stale, which this line
+did.
 
 Then seed, once, after reading `seeds/athlete.json` — especially the constraints,
 which cannot be corrected automatically by design:
@@ -350,6 +392,65 @@ docker compose run --rm --entrypoint /bin/sh coach-agent -c \
 ```
 
 Re-running is safe: a value already current is left alone rather than superseded.
+
+## Updating to a newer commit
+
+The image is built from a checkout on the box rather than pulled, so an update is
+three steps and the first one happens somewhere else.
+
+```bash
+cd /mnt/cache/appdata/coach-bot/src      # wherever build.context points
+git pull
+git --no-pager log --oneline -1          # confirm it moved
+```
+
+Then, back in the application project:
+
+```bash
+docker compose build
+docker compose up -d migrate
+docker compose logs migrate              # read it; see "Bring it up" above
+docker compose up -d coach-agent coach-ingest coach-scheduler
+```
+
+**Confirm the checkout actually moved before rebuilding.** A `git pull` run in
+the wrong directory fails loudly, but a rebuild against an unchanged checkout
+succeeds and produces the old image, and the symptom is a new command still
+reporting `command not found` after everything looked like it worked.
+
+If `git status` there says "not a git repository", the source was copied rather
+than cloned. Replace it and keep the old one until the rebuild works; nothing in
+it is state, since the database is a separate project and `.env` and the secrets
+live with the application project.
+
+## Running a command inside the deployment
+
+`coach-transcript` and `coach-reconcile` are console scripts in the image's
+virtualenv, not on the host's `PATH`. There is no host Python environment with
+this package installed, and the data only exists in the deployment, so the only
+way to run either is inside a container.
+
+Same shape as the seed above, and the `PGPASSWORD` export is not optional: the
+password is a mounted secret and libpq reads it from the environment.
+
+```bash
+docker compose run --rm --entrypoint /bin/sh coach-agent -c \
+  'export PGPASSWORD="$(cat /run/secrets/app_password)"; exec coach-transcript --last 5'
+```
+
+```bash
+docker compose run --rm --entrypoint /bin/sh coach-agent -c \
+  'export PGPASSWORD="$(cat /run/secrets/app_password)"; exec coach-reconcile'
+```
+
+`--rm` because these exit; `coach-agent` because it already has the database
+environment and the secret, and nothing here needs the Anthropic key.
+
+**`coach-reconcile` is a one-off** for the matching defect fixed on 3 August
+2026, and it is a dry run unless given `--apply`. Read the plan before applying:
+it moves prescriptions to 'completed' and freezes compliance against them, which
+changes past weeks' adherence in the Sunday review. On a deployment that started
+after the fix there will be nothing to do, and it says so.
 
 ## What the handover flagged, answered
 

@@ -231,6 +231,21 @@ because it reads history rather than making calls. Payloads are kept for
 `COACH_PAYLOAD_RETENTION_DAYS`, default 90, and pruned on the nightly pass; the
 cost rows behind `model_calls` are never pruned.
 
+**Those forms are for a checkout with the package installed.** On a deployed
+stack the console scripts live in the image's virtualenv and are not on the
+host's `PATH`, and the data is only in the deployment, so they have to be run
+inside a container. `docs/deploy-existing-postgres.md` has the exact form under
+"Running a command inside the deployment"; it looks like this:
+
+```bash
+docker compose run --rm --entrypoint /bin/sh coach-agent -c \
+  'export PGPASSWORD="$(cat /run/secrets/app_password)"; exec coach-transcript --last 5'
+```
+
+Worth stating because the bare form fails with `command not found` on the host,
+which reads like a broken install rather than a command being run in the wrong
+place.
+
 `coach-reconcile` is a one-off, and it is worth running once on any deployment
 that was ingesting before 3 August 2026. Until then the live poll path never
 matched a ride to its prescription, so every completed ride left its
@@ -251,7 +266,19 @@ a break, cancelled, or already settled as missed, and it neither reviews nor
 runs the P09 adjustment rules over history.
 
 Once it has been run there is nothing left for it to do, and the module can be
-deleted.
+deleted. On a deployed stack it runs the same way `coach-transcript` does, inside
+a container:
+
+```bash
+docker compose run --rm --entrypoint /bin/sh coach-agent -c \
+  'export PGPASSWORD="$(cat /run/secrets/app_password)"; exec coach-reconcile'
+```
+
+**A deployment that started after the fix will have nothing to do**, and it says
+so rather than staying silent. Run 3 August 2026 against the live stack it
+reported nothing to reconcile, correctly: only three prescriptions had ever been
+written, and the one in the past had already been closed by the fixed ingest
+path minutes earlier.
 
 #### Under compose
 
