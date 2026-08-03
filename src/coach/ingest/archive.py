@@ -39,12 +39,48 @@ class Discovered:
     size: int
     session_id: int | None = None
     already_known: bool = False
+    # Set once a file has been judged uningestible. The bytes are hashed, so the
+    # judgement can never go stale: the same content gets the same answer.
+    unreadable_reason: str | None = None
 
 
 def _known(conn: psycopg.Connection, sha256: str) -> dict[str, Any] | None:
     with conn.cursor() as cur:
-        cur.execute("select id, session_id from fit_archive where sha256 = %s", (sha256,))
+        cur.execute(
+            "select id, session_id, unreadable_reason from fit_archive where sha256 = %s",
+            (sha256,),
+        )
         return cur.fetchone()
+
+
+def mark_unreadable(conn: psycopg.Connection, sha256: str, reason: str) -> None:
+    """Record why this file yields no session, so the next scan does not retry.
+
+    `coalesce` on the stamp rather than overwriting it: the interesting date is
+    when the file first defeated us, and a scan runs every poll interval.
+    """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "update fit_archive set unreadable_reason = %s, "
+            "unreadable_at = coalesce(unreadable_at, now()) where sha256 = %s",
+            (reason, sha256),
+        )
+
+
+def unreadable(conn: psycopg.Connection) -> list[dict[str, Any]]:
+    """Every archived file that produced no session, and why.
+
+    The operator's way to see what the log stopped repeating. FIT-15 means these
+    rows stay: a file that cannot be read today is still the only copy of that
+    ride, and a firmware fix or a better parser makes it readable tomorrow.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "select id, path, sha256, size_bytes, unreadable_reason, unreadable_at "
+            "  from fit_archive where unreadable_reason is not null "
+            " order by unreadable_at, id"
+        )
+        return cur.fetchall()
 
 
 def register(conn: psycopg.Connection, path: Path, data: bytes) -> Discovered:
@@ -119,7 +155,14 @@ def keep_local(conn: psycopg.Connection, path: Path, data: bytes) -> Discovered:
     sha = parse.content_hash(data)
     known = _known(conn, sha)
     if known is not None:
-        return Discovered(path, sha, len(data), known["session_id"], already_known=True)
+        return Discovered(
+            path,
+            sha,
+            len(data),
+            known["session_id"],
+            already_known=True,
+            unreadable_reason=known["unreadable_reason"],
+        )
 
     # Stored decompressed for the same reason `keep_original` is: the extension
     # says FIT and FIT-16 posts these back to an endpoint that reads the name.
@@ -150,14 +193,31 @@ def ingest_file(
     if discovered.already_known and discovered.session_id:
         return discovered.session_id
 
-    try:
-        parsed = parse.from_fit(payload)
-    except parse.UnparseableActivity as exc:
-        log.warning("skipping %s: %s", path, exc)
+    # Judged before, and the bytes have not changed since. Re-parsing produces
+    # the same failure and the same warning, which is what two files on the live
+    # deployment did on every poll pass for three weeks.
+    if discovered.unreadable_reason:
+        log.debug("%s is known to be unreadable (%s); skipping", path, discovered.unreadable_reason)
         return None
 
+    try:
+        parsed = parse.from_fit(payload)
+    except parse.NotAnActivityFile as exc:
+        # Not a fault. A device or sync tool put a settings or workout file in
+        # the folder; there was never a session in it to miss.
+        log.info("%s is not an activity file (%s); it will not be read again", path, exc)
+        mark_unreadable(conn, discovered.sha256, str(exc))
+        return None
+    except parse.UnparseableActivity as exc:
+        log.warning("cannot read %s: %s; it will not be read again", path, exc)
+        mark_unreadable(conn, discovered.sha256, str(exc))
+        return None
+
+    # Reachable: records carrying power but no timestamps parse fine and are
+    # still undateable, so `from_fit` returns rather than raising.
     if parsed.started_at is None:
-        log.warning("skipping %s: no timestamps, so FIT-10 cannot date it", path)
+        log.warning("cannot date %s: no timestamps, so FIT-10 cannot place it", path)
+        mark_unreadable(conn, discovered.sha256, "no timestamps, so FIT-10 cannot date it")
         return None
 
     # The file's own sport, which is the only thing here that knows. Falling back
@@ -180,8 +240,20 @@ def ingest_file(
         "type": kind,
         "start_date_local": parsed.started_at.isoformat(),
     }
+    if parsed.samples_missing:
+        log.info("%s carries no samples; recording it as an activity with no usable data", path)
+
     result = actmod.ingest(
-        conn, synthetic, tz, file_bytes=payload, source="local_file", fallback_name=path.stem
+        conn,
+        synthetic,
+        tz,
+        file_bytes=payload,
+        source="local_file",
+        fallback_name=path.stem,
+        # FIT-15 and migration 015: he trained and the file did not survive. The
+        # row exists so FIT-12 can see the day was not empty, and the flag is
+        # what stops it being read as a ride that recorded zero watts.
+        data_unavailable=parsed.samples_missing,
     )
 
     with conn.transaction(), conn.cursor() as cur:

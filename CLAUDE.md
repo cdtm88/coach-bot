@@ -73,6 +73,14 @@ entirely, because a secret in a column is a secret in the nightly `pg_dump`.
 matcher. `blocks/constraints.py` refuses to generate rather than proceed as
 though he were unconstrained.
 
+**Do not decide to drop data without checking who already decided to keep it.**
+Migration 015 argues at length that an activity the system cannot describe must
+be recorded rather than deleted, because FIT-12 counts sessions on a day before
+calling a prescription missed. `archive.ingest_file` made the same call the
+opposite way and threw two of the athlete's rides away. Migration comments are
+where the reasoning lives in this repository; read the one that owns the column
+before writing a second answer.
+
 **Do not leave a failing test.** `pacer-ai` carried nine through half the
 project and nobody could read the suite at a glance. Fix or delete, same day.
 
@@ -94,7 +102,7 @@ happily while building nothing. `docs/deploy-existing-postgres.md` has both.
 
 ```bash
 ./scripts/dev-db.sh start     # Postgres dies on container churn; this brings it back
-uv run pytest -q              # ~3 minutes, real Postgres, 979 tests
+uv run pytest -q              # ~3 minutes, real Postgres, 997 tests
 uv run ruff check . && uv run ruff format --check .
 ```
 

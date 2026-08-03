@@ -70,3 +70,54 @@ def build_fit(
         builder.add(record)
 
     return bytes(builder.build().to_bytes())
+
+
+def build_recordless_fit(
+    start: datetime | None = None,
+    file_type: str = "ACTIVITY",
+    sport: str | None = None,
+    sub_sport: str | None = None,
+    with_file_id: bool = True,
+    with_session: bool = True,
+) -> bytes:
+    """A FIT file with a header and a summary but no record stream.
+
+    Two real things wear this shape and they need opposite handling, so both are
+    buildable here. An aborted ride keeps `file_id.type = activity` and a
+    `session` that says when and what — Zwift and Garmin both write those before
+    the samples are flushed. A settings, workout or course file has the same
+    absence of records and was never an activity at all.
+
+    `with_file_id` off is the third case and not a hypothetical: nothing in the
+    FIT spec obliges a writer to be reachable, and every fixture in this suite
+    predating `file_id` is a file that declares no type.
+    """
+    from fit_tool.fit_file_builder import FitFileBuilder
+    from fit_tool.profile.messages.file_id_message import FileIdMessage
+    from fit_tool.profile.messages.session_message import SessionMessage
+    from fit_tool.profile.profile_type import FileType, Sport, SubSport
+
+    builder = FitFileBuilder(auto_define=True)
+    stamp = int(start.timestamp() * 1000) if start else None
+
+    if with_file_id:
+        ident = FileIdMessage()
+        ident.type = FileType[file_type.upper()]
+        if stamp is not None:
+            ident.time_created = stamp
+        builder.add(ident)
+
+    if with_session and stamp is not None:
+        session = SessionMessage()
+        session.start_time = stamp
+        # The device's own totals. Written because a real file has them, and
+        # asserted nowhere in the session row: FIT-03 and the `data_unavailable`
+        # contract both say these must not be read.
+        session.total_elapsed_time = 3600
+        if sport is not None:
+            session.sport = Sport[sport.upper()]
+            if sub_sport is not None:
+                session.sub_sport = SubSport[sub_sport.upper()]
+        builder.add(session)
+
+    return bytes(builder.build().to_bytes())

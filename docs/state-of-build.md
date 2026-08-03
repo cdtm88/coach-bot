@@ -36,8 +36,9 @@
 | — | `CLAUDE.md`, the resolved-debug directory, and the corrected zone tables | built |
 | P16 | The trust layer, in shadow (TRUST-01 to TRUST-08) | built |
 | — | P09 wired, and the matching defect underneath it | built |
+| — | A FIT file with no samples is an activity, not a non-event | built |
 
-979 tests, all against a real Postgres. Schema is at migration 019; the
+997 tests, all against a real Postgres. Schema is at migration 020; the
 scheduler's own ledger is created on first use rather than as a migration,
 because it is process bookkeeping rather than part of the memory design.
 

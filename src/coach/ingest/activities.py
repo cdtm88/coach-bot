@@ -299,6 +299,7 @@ def ingest(
     backfilled: bool = False,
     source: str = "intervals",
     fallback_name: str | None = None,
+    data_unavailable: bool = False,
 ) -> Ingested:
     """Create or update one session row.
 
@@ -358,7 +359,14 @@ def ingest(
     # FIT-12's missed check can see that the athlete did something on the day —
     # deleting it is what turns a gym session he did into a session he skipped —
     # and the flag is what stops it being read as an activity with no numbers.
-    unreadable = upstream_read and is_unreadable(activity)
+    #
+    # `data_unavailable` is the same statement made by a caller that read the
+    # file rather than the platform: FIT-14's watched folder, where a FIT file
+    # carrying a session header and no record stream means precisely this. The
+    # two are OR'd rather than the parameter defaulting from `is_unreadable`,
+    # because an upstream placeholder and a truncated local file are two
+    # independent ways to land here and either alone is enough.
+    unreadable = (upstream_read and is_unreadable(activity)) or data_unavailable
 
     # FIT-07 follows the discipline the row will actually have, which is not this
     # call's when this call is not the one allowed to set it. Reading the stored

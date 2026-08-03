@@ -145,6 +145,7 @@ indistinguishable from the bot being down.
 | FIT-15 | The local FIT archive is retained permanently and is never pruned by upstream changes. | Disconnecting an upstream integration leaves the local archive intact. |
 | FIT-16 | The local archive can restore upstream by looping files through the activity upload endpoint. | A deleted upstream activity is restorable from local files. |
 | FIT-17 | Activities authored by the coach carry a marker and are matched to the existing local session on ingest rather than creating a second one. | A manually written gym session returning through the webhook produces no duplicate. |
+| FIT-18 | An activity the system cannot describe is recorded as having happened rather than dropped, on every ingest path, and is excluded from totals, reviews and compliance rather than counted as zero. Added 3 August 2026: the rule was settled in migration 015 and implemented only for upstream placeholders, so a local file whose samples were lost was discarded — two of the athlete's July activities were absent for three weeks. A file that is not an activity at all is distinguished from one whose data is missing, and neither is re-read once judged. | A FIT file carrying a session header and no record stream produces a session flagged `data_unavailable`; the day is not reported as missed; no prescription is closed by it; no review is written for it; a second scan pass logs nothing. |
 
 ### Nutrition and body mass ingest
 

@@ -34,6 +34,19 @@ class UnparseableActivity(ValueError):
     """The file or stream payload could not be read as an activity."""
 
 
+class NotAnActivityFile(UnparseableActivity):
+    """A perfectly readable FIT file that does not describe an activity.
+
+    FIT is a container format and a device writes far more than rides into it:
+    settings, courses, workouts, daily monitoring. Dropping one of those in the
+    watched folder is not a fault and there is nothing to ingest, which is a
+    different answer from "this was a ride and the file is broken". Separated
+    because the two get handled differently — see :func:`coach.ingest.archive.
+    ingest_file`, where one becomes a session and the other becomes a note in
+    the archive saying not to try again.
+    """
+
+
 @dataclass
 class Parsed:
     """Values computed from samples. Never populated from an `icu_` field."""
@@ -55,6 +68,18 @@ class Parsed:
     # go on when there is no platform to ask.
     sport: str | None = None
     sub_sport: str | None = None
+    # What the file says it *is*, from `file_id`: 'activity', 'workout',
+    # 'course', 'settings'. Distinct from `sport`, which says what was done.
+    # A file that carries no `file_id` leaves this None, which reads as "did not
+    # say" rather than "said it was an activity" — every fixture written before
+    # this existed is in that position.
+    file_type: str | None = None
+    # An activity file that carries no samples at all. Not a parse failure: the
+    # athlete rode, and the file that survived says only when. Everything in
+    # this dataclass except `started_at` is therefore None, and the session
+    # built from it is FIT-15's `data_unavailable` — see migration 015 for why
+    # that row exists rather than nothing.
+    samples_missing: bool = False
     source_kind: str = "unknown"
     warnings: list[str] = field(default_factory=list)
 
@@ -173,6 +198,14 @@ def from_fit(data: bytes) -> Parsed:
     last_altitude: float | None = None
     sport: str | None = None
     sub_sport: str | None = None
+    file_type: str | None = None
+    time_created: datetime | None = None
+    session_start: datetime | None = None
+
+    def _aware(raw: object) -> datetime | None:
+        if not isinstance(raw, datetime):
+            return None
+        return raw if raw.tzinfo else raw.replace(tzinfo=UTC)
 
     try:
         with fitdecode.FitReader(io.BytesIO(data)) as reader:
@@ -190,6 +223,18 @@ def from_fit(data: bytes) -> Parsed:
                 if frame.name in ("sport", "session"):
                     sport = sport or _enum_name(value("sport"))
                     sub_sport = sub_sport or _enum_name(value("sub_sport"))
+
+                # Read for the sake of a file with no records at all. Every
+                # device writes `file_id`, and it is the only message that says
+                # what kind of file this is; `session.start_time` is the ride's
+                # own start where the records that would have carried it are
+                # gone. Both are the file's statement about itself and neither
+                # is an aggregate, so FIT-03 is untouched — see `_no_samples`.
+                if frame.name == "file_id":
+                    file_type = file_type or _enum_name(value("type"))
+                    time_created = time_created or _aware(value("time_created"))
+                if frame.name == "session":
+                    session_start = session_start or _aware(value("start_time"))
 
                 if frame.name != "record":
                     continue
@@ -219,7 +264,7 @@ def from_fit(data: bytes) -> Parsed:
         raise UnparseableActivity(f"not a readable FIT file: {exc}") from exc
 
     if not (power or hr or cadence or started_at):
-        raise UnparseableActivity("FIT file contained no record messages")
+        return _no_samples(file_type, session_start or time_created, sport, sub_sport)
 
     duration = None
     if started_at and last_timestamp:
@@ -235,7 +280,48 @@ def from_fit(data: bytes) -> Parsed:
         duration,
         "fit",
     )
+    parsed.sport, parsed.sub_sport, parsed.file_type = sport, sub_sport, file_type
+    return parsed
+
+
+def _no_samples(
+    file_type: str | None,
+    when: datetime | None,
+    sport: str | None,
+    sub_sport: str | None,
+) -> Parsed:
+    """A FIT file with no record messages, and which of three things that means.
+
+    *Not an activity at all.* A settings, workout or course file, which a device
+    or a sync tool will happily leave in the same folder. Nothing to ingest and
+    nothing wrong; :class:`NotAnActivityFile` says so distinctly.
+
+    *An activity whose samples did not survive.* Zwift and Garmin both write the
+    header and the session summary before the record stream is flushed, so a
+    crash or a pulled cable leaves a file that says a ride happened, when, and
+    what kind, and nothing else. Migration 015 settled what to do with exactly
+    this shape of evidence and settled it the other way from how this path used
+    to behave: **the row stays and says what it is.** Dropping it is what turns
+    a session the athlete did into a session FIT-12 reports he skipped.
+
+    So this returns a Parsed carrying the start time and nothing else, flagged
+    `samples_missing`. FIT-10 is satisfied because the time is the file's own
+    and not the ingest clock. FIT-03 is satisfied by omission: `session` also
+    holds the device's total elapsed time and average power, and none of it is
+    read, because a `data_unavailable` session's contract with the weekly review
+    is that its time and distance are *missing* rather than sourced elsewhere.
+
+    *Neither.* No records and no time anywhere, so there is nothing to date it
+    by and FIT-10 forbids inventing one. Unparseable, as before.
+    """
+    if file_type is not None and file_type != "activity":
+        raise NotAnActivityFile(f"a FIT {file_type} file, which is not an activity")
+    if when is None:
+        raise UnparseableActivity("FIT file contained no record messages")
+
+    parsed = Parsed(started_at=when, source_kind="fit", samples_missing=True, file_type=file_type)
     parsed.sport, parsed.sub_sport = sport, sub_sport
+    parsed.warnings.append("no record messages; the activity is dated but has no samples")
     return parsed
 
 
