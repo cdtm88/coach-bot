@@ -96,6 +96,13 @@ class Hit:
 @dataclass
 class Report:
     turns: int = 0
+    # Turns whose reply contained at least one figure the scanner checks, and
+    # the total number of those figures. A reply with no claim in it is not
+    # evidence about the scanner in either direction, and counting it as a clean
+    # turn is how three replies reading "I am not going to get into that" came
+    # back as a 0% false positive rate.
+    turns_with_claims: int = 0
+    claims_seen: int = 0
     flagged: int = 0
     unreadable: int = 0
     hits: list[Hit] = field(default_factory=list)
@@ -248,6 +255,11 @@ def audit(calls: list[transcript.Call], ledger_from: Any = None) -> Report:
         for payload in _tool_results(last.messages):
             attribution.add_tool_result(payload)
 
+        stated = trust.claims_in(reply)
+        if stated:
+            report.turns_with_claims += 1
+            report.claims_seen += len(stated)
+
         loose = trust.unattributed(reply, attribution)
         if not loose:
             continue
@@ -353,16 +365,33 @@ def render(report: Report, quiet: bool = False, full: bool = False) -> str:
 
     if not report.flagged:
         out.append("")
+        # A turn the scanner had nothing to check is not a turn the scanner
+        # passed. Reported first, because when this is zero the paragraph below
+        # would otherwise be a claim about a measurement that never happened.
+        if not report.turns_with_claims:
+            out.append(
+                f"None of the {report.turns} replayed turn(s) stated a figure the "
+                "scanner checks, so nothing was measured and nothing was flagged. "
+                "This is not evidence about the scanner. The scanner reads "
+                "physiological units only -- watts, bpm, kg, TSS, CTL and the rest "
+                "-- so a reply can be entirely wrong about times, dates, session "
+                "names or what the system can see and still show up here as clean."
+            )
+            return "\n".join(out)
+
         out.append(
-            f"Nothing was flagged across {report.turns} turn(s). That is evidence the "
-            "scanner does not fire on the coach's ordinary voice, which is the half of "
-            "TRUST-07 this command can answer. It is not evidence that it catches a "
-            "fabrication; tests/fixtures/trust_corpus.py is the other half."
+            f"Nothing was flagged across {report.turns_with_claims} turn(s) stating "
+            f"{report.claims_seen} checkable figure(s), out of {report.turns} replayed. "
+            "That is evidence the scanner does not fire on the coach's ordinary voice, "
+            "which is the half of TRUST-07 this command can answer. It is not evidence "
+            "that it catches a fabrication; tests/fixtures/trust_corpus.py is the other "
+            "half, and it says nothing at all about claims that carry no unit."
         )
-        if report.turns < THIN_EVIDENCE:
+        if report.turns_with_claims < THIN_EVIDENCE:
             out.append("")
             out.append(
-                f"{report.turns} turn(s) is a thin sample. {THIN_EVIDENCE} is the floor "
+                f"{report.turns_with_claims} turn(s) with a claim in them is a thin "
+                f"sample. {THIN_EVIDENCE} is the floor "
                 "this command will call unremarkable -- roughly a week of conversation "
                 "for one athlete -- and it is a judgement about not being a fluke, not a "
                 "statistical claim. Under that, a clean run is worth re-running later "

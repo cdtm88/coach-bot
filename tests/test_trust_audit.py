@@ -369,13 +369,21 @@ def test_a_clean_run_under_the_floor_says_it_is_thin(conn: psycopg.Connection) -
 
 def test_a_clean_run_at_the_floor_does_not(conn: psycopg.Connection) -> None:
     """The other boundary, per the threshold rule."""
-    report = trust_audit.Report(turns=trust_audit.THIN_EVIDENCE, ledger_from=None)
+    report = trust_audit.Report(
+        turns=trust_audit.THIN_EVIDENCE,
+        turns_with_claims=trust_audit.THIN_EVIDENCE,
+        claims_seen=trust_audit.THIN_EVIDENCE,
+    )
 
     assert "thin sample" not in trust_audit.render(report)
 
 
 def test_a_clean_run_one_below_the_floor_does(conn: psycopg.Connection) -> None:
-    report = trust_audit.Report(turns=trust_audit.THIN_EVIDENCE - 1, ledger_from=None)
+    report = trust_audit.Report(
+        turns=trust_audit.THIN_EVIDENCE - 1,
+        turns_with_claims=trust_audit.THIN_EVIDENCE - 1,
+        claims_seen=trust_audit.THIN_EVIDENCE - 1,
+    )
 
     assert "thin sample" in trust_audit.render(report)
 
@@ -429,3 +437,67 @@ def test_only_chat_is_audited_by_default(conn: psycopg.Connection) -> None:
 
     assert report.turns == 1
     assert [h.claim for h in report.hits] == ["250 W"]
+
+
+# --- a turn with nothing to check is not a turn that passed --------------------
+#
+# The live deployment's second audit replayed three real turns and reported a 0%
+# false positive rate. All three replies were prose: "No, and I need to correct
+# something", "Because I don't have a working connection", "I'm not going to get
+# into that". Not one contained a figure the scanner reads, so nothing was
+# measured -- and the same conversation contained a fabricated session time the
+# scanner is not scoped to see at all.
+
+
+def test_replies_with_no_claims_are_not_reported_as_evidence(
+    conn: psycopg.Connection,
+) -> None:
+    record(conn, "I'm not going to get into that.", system=[{"text": "His FTP is 168 W."}])
+
+    report = audited(conn)
+    rendered = trust_audit.render(report)
+
+    assert report.turns == 1
+    assert report.turns_with_claims == 0
+    assert "nothing was measured" in rendered
+    assert "not evidence about the scanner" in rendered
+    assert "does not fire on the coach's ordinary voice" not in rendered
+
+
+def test_the_report_names_what_the_scanner_cannot_see(conn: psycopg.Connection) -> None:
+    """A reply can be wholly wrong and still come back clean.
+
+    The fabrication that mattered on 3 August was a session time, and times
+    carry no physiological unit. Saying so is the difference between a result
+    and a false reassurance.
+    """
+    record(conn, "That ran 16:45 to 17:15.", system=[{"text": "His FTP is 168 W."}])
+
+    rendered = trust_audit.render(audited(conn))
+
+    assert "times, dates, session" in rendered
+
+
+def test_claims_are_counted_not_just_turns(conn: psycopg.Connection) -> None:
+    record(
+        conn,
+        "You held 168 W and your CTL 42 is steady.",
+        system=[{"text": "His FTP is 168 W and CTL 42."}],
+    )
+
+    report = audited(conn)
+
+    assert report.turns_with_claims == 1
+    assert report.claims_seen == 2
+    assert "2 checkable figure(s)" in trust_audit.render(report)
+
+
+def test_the_floor_counts_turns_with_claims_not_turns(conn: psycopg.Connection) -> None:
+    """Thirty silent turns are not thirty turns of evidence."""
+    report = trust_audit.Report(
+        turns=trust_audit.THIN_EVIDENCE * 2,
+        turns_with_claims=1,
+        claims_seen=1,
+    )
+
+    assert "thin sample" in trust_audit.render(report)

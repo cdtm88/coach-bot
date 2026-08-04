@@ -72,6 +72,49 @@ def render_continuity(conn: psycopg.Connection) -> str:
     return "\n".join(lines)
 
 
+def render_capabilities() -> str:
+    """What the coach can look up, and the rule that it must look before refusing.
+
+    The prompt described the athlete in twelve blocks and never once described
+    the system. Eleven tools were offered and the model was left to infer what it
+    could reach from whatever happened to be in its context, which it did, and
+    got wrong: asked to confirm rides it held, it answered "calendar and
+    activities feeds have never returned successfully for this account" and made
+    no tool call at all. Every feed had returned successfully that hour.
+
+    That is the same failure TRUST-05 names for numbers, pointed the other way. A
+    model with a strong prohibition and no orientation invents; the invention
+    here was a limitation rather than a figure, and a scanner watching for
+    fabricated watts would never see it.
+
+    Static, and in the cached prefix with the persona: it describes the system,
+    which changes when the code changes and not when the athlete does.
+    """
+    return (
+        "WHAT YOU CAN LOOK UP\n"
+        "Ask for it rather than working from what happens to be in this prompt.\n"
+        "- get_sessions: rides, gym sessions and golf rounds, with power, heart "
+        "rate, duration and distance. This is how you answer anything about what "
+        "he actually did.\n"
+        "- get_plan: prescriptions and their status.\n"
+        "- get_calendar: his own diary, the same feed as HIS DIARY below.\n"
+        "- get_context, search_memory: what you hold on a topic, and past "
+        "conversations.\n"
+        "\n"
+        "**Never tell him you cannot see something until you have called the tool "
+        'that would show it.** "I do not have access to that" is a claim about '
+        "this system, and you are not the one holding the evidence for it. If a "
+        "tool returns nothing, say what you looked at and what came back. If "
+        "there is genuinely no tool for what he asked, call log_capability_gap "
+        "and say the one sentence it gives you.\n"
+        "\n"
+        "You do not read raw files and you do not need to: what a .fit contains "
+        "is already parsed into the sessions get_sessions returns. Saying you "
+        "cannot open a file is true and useless if you did not then look at the "
+        "data that came out of it."
+    )
+
+
 def render_staleness(conn: psycopg.Connection, now: datetime) -> str:
     """CHAT-09: a stale feed is surfaced so the agent asks rather than infers.
 
@@ -99,7 +142,24 @@ def render_staleness(conn: psycopg.Connection, now: datetime) -> str:
         )
         stale = cur.fetchall()
     if not stale:
-        return ""
+        # Silence used to mean healthy, and silence is exactly what the coach
+        # filled in for itself. On 3 August 2026 it told the athlete "calendar
+        # and activities feeds have never returned successfully for this
+        # account" with all five stamped inside the hour, and consolidation
+        # wrote that into the rolling summary, where it was read back the next
+        # turn as established and said again.
+        #
+        # Worded narrowly on purpose. CHAT-09's whole point is that absence of
+        # data is not evidence of absence of activity, so this must not become
+        # "you have everything". It says the feeds answered, and forbids the one
+        # inference that was actually drawn.
+        return (
+            "FEEDS\n"
+            "Every feed has returned successfully inside its window. A feed that is "
+            "working and quiet is not a feed that is broken: if you hold no data on "
+            "something, look it up before saying you cannot see it, and never tell "
+            "him a sync is down without evidence from this block."
+        )
 
     lines = [
         "STALE FEEDS",
@@ -259,6 +319,10 @@ def assemble(
     parts = {
         "persona": persona.load(),
         "constraints": render_constraints(conn),
+        # Describes the system rather than the athlete, so it caches with the
+        # persona. Ordered after the constraints because SAFE-01 requires those
+        # at the top of every prompt and nothing displaces them.
+        "capabilities": render_capabilities(),
         # First of the volatile blocks, and first for a reason: everything below
         # is evidence about the athlete, and this is where he is standing. It
         # changes every turn, so it sits after the cache breakpoint.
@@ -282,6 +346,12 @@ def assemble(
     return ctxmod.assemble(parts, **kwargs)
 
 
+# The cached prefix: everything that describes the coach and the system rather
+# than the athlete. Named once so the block list and the cache boundary cannot
+# disagree about which is which.
+STABLE = ("persona", "constraints", "capabilities")
+
+
 def as_system_blocks(assembled: ctxmod.AssembledContext) -> list[dict[str, Any]]:
     """Render the assembled context as Anthropic system blocks.
 
@@ -290,8 +360,8 @@ def as_system_blocks(assembled: ctxmod.AssembledContext) -> list[dict[str, Any]]
     re-read each day rather than invalidating the stable prefix.
     """
     blocks: list[dict[str, Any]] = []
-    stable = [c for c in assembled.components if c.name in ("persona", "constraints")]
-    volatile = [c for c in assembled.components if c.name not in ("persona", "constraints")]
+    stable = [c for c in assembled.components if c.name in STABLE]
+    volatile = [c for c in assembled.components if c.name not in STABLE]
 
     if stable:
         blocks.append(

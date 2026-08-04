@@ -134,6 +134,28 @@ Keys marked SAFETY are listed so you can read them, and you may not write them. 
 A constraint is recorded only when the athlete states it and confirms it, in \
 conversation. A diff naming a safety key is rejected and the attempt is logged.
 
+## The coach's claims about the system are not evidence
+
+Anything the coach said about *this system* — that a feed is broken, that a sync \
+has never worked, that history is not visible, that it cannot see something — \
+never becomes a summary line, an open thread, or a fact. Those are not \
+observations about the athlete, and the coach is not the one holding the \
+evidence for them. The system reports its own state into every prompt, from the \
+database, and it is right when the coach is not.
+
+This is a loop, not a stray error. On 3 August 2026 the coach told the athlete \
+the calendar and activity feeds had never returned successfully; all five had \
+answered within the hour. It was written into the rolling summary and into two \
+open threads, read back the next turn as established, and repeated. A month of \
+correctly ingested rides was marked unverified on the strength of it.
+
+The athlete saying his sync is broken is different: that is him, and it belongs \
+in the day summary as something he said.
+
+Retractions get the same treatment. A coach apologising for a fabrication is not \
+evidence that a fabrication happened, and recording one turns a bad apology into \
+a durable claim against real data.
+
 ## The summaries
 
 * `day_summary` — a few sentences, factual, in the third person. What happened, \

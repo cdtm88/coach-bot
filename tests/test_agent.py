@@ -113,11 +113,75 @@ def test_stale_feed_is_surfaced_as_context(conn: psycopg.Connection) -> None:
     assert "Absence of data is not evidence" in rendered
 
 
-def test_fresh_feed_produces_no_staleness_block(conn: psycopg.Connection) -> None:
+def test_fresh_feeds_produce_no_warning(conn: psycopg.Connection) -> None:
+    """This asserted an empty string, and the empty string was the defect.
+
+    A healthy feed produced no block at all, so the prompt said nothing about
+    feed health either way, and the coach filled the silence with the opposite
+    of the truth. It now states the healthy case; what it must not do is warn.
+    """
     with conn.cursor() as cur:
         cur.execute("update feeds set last_success_at = %s", (NOW,))
     conn.commit()
-    assert prompt.render_staleness(conn, NOW) == ""
+
+    rendered = prompt.render_staleness(conn, NOW)
+
+    assert "STALE FEEDS" not in rendered
+    assert "Absence of data is not evidence" not in rendered
+
+
+# --- the prompt describes the system, not only the athlete --------------------
+#
+# On 3 August 2026 the coach told the athlete "calendar and activities feeds have
+# never returned successfully for this account" and made no tool call in three
+# turns. Every feed had returned successfully that hour, and eleven tools were
+# offered. Nothing in the prompt had ever said what the system could reach, so
+# the model inferred it from the absence of ride data in its context.
+
+
+def test_the_prompt_says_what_the_coach_can_look_up(conn: psycopg.Connection) -> None:
+    assembled = prompt.assemble(conn, NOW, tz=DUBAI_TZ)
+    rendered = assembled.render()
+
+    assert "capabilities" in assembled.names()
+    assert "get_sessions" in rendered
+    assert "get_plan" in rendered
+
+
+def test_the_prompt_forbids_claiming_a_limit_before_looking(
+    conn: psycopg.Connection,
+) -> None:
+    """The rule the whole block exists for.
+
+    A model with a strong prohibition and no orientation invents; here it
+    invented a limitation rather than a figure, which a scanner watching for
+    fabricated watts would never see.
+    """
+    rendered = prompt.render_capabilities()
+
+    assert "until you have called the tool" in rendered
+    assert "log_capability_gap" in rendered, "TRUST-05's escape hatch, or it is a bare prohibition"
+
+
+def test_the_capability_block_is_cached_with_the_persona(
+    conn: psycopg.Connection,
+) -> None:
+    """It describes the system, which changes with the code and not the athlete.
+
+    Asserted against the cache breakpoint rather than the block list, because a
+    block that lands after it re-bills the whole prefix every turn.
+    """
+    blocks = prompt.as_system_blocks(prompt.assemble(conn, NOW, tz=DUBAI_TZ))
+
+    stable = [b for b in blocks if b.get("cache_control")]
+    assert len(stable) == 1
+    assert "WHAT YOU CAN LOOK UP" in stable[0]["text"]
+
+
+def test_the_capability_block_needs_no_database(conn: psycopg.Connection) -> None:
+    """Static by design: a prompt block that cannot fail is one that cannot go
+    missing on the turn it is most needed."""
+    assert "get_sessions" in prompt.render_capabilities()
 
 
 # --- CHAT-11: one interruption per conversation ----------------------------
@@ -439,3 +503,51 @@ def test_the_question_never_spends_the_interruption_budget() -> None:
     """CHAT-09's precedent: absence of data shapes reasoning, it does not interrupt."""
     assert "unreadable" not in interruptions.PRIORITY
     assert "unreadable_activity" not in interruptions.PRIORITY
+
+
+def test_healthy_feeds_say_so_rather_than_saying_nothing(conn: psycopg.Connection) -> None:
+    """Silence was what the coach filled in for itself.
+
+    With every feed stamped, this block used to be empty, and the coach told the
+    athlete the feeds had never returned successfully. Absence of a warning is
+    not a statement, and the model treated it as licence to invent one.
+    """
+    with conn.cursor() as cur:
+        cur.execute("update feeds set last_success_at = %s", (NOW,))
+    conn.commit()
+
+    rendered = prompt.render_staleness(conn, NOW)
+
+    assert "returned successfully" in rendered
+    assert "look it up before saying you cannot see it" in rendered
+
+
+def test_the_healthy_block_does_not_claim_completeness(conn: psycopg.Connection) -> None:
+    """CHAT-09 both ways.
+
+    "Every feed answered" must not become "you have everything" -- absence of
+    data is still not evidence of absence of activity, and a block that implied
+    otherwise would trade one false inference for its mirror.
+    """
+    with conn.cursor() as cur:
+        cur.execute("update feeds set last_success_at = %s", (NOW,))
+    conn.commit()
+
+    rendered = prompt.render_staleness(conn, NOW).lower()
+
+    assert "working and quiet is not a feed that is broken" in rendered
+    for overclaim in ("you have all", "complete", "everything he has done"):
+        assert overclaim not in rendered
+
+
+def test_a_stale_feed_still_warns(conn: psycopg.Connection) -> None:
+    """The branch that existed first, and still has to win."""
+    with conn.cursor() as cur:
+        cur.execute("update feeds set last_success_at = null where name = 'activities'")
+    conn.commit()
+
+    rendered = prompt.render_staleness(conn, NOW)
+
+    assert "activities" in rendered
+    assert "Absence of data is not evidence" in rendered
+    assert "returned successfully inside its window" not in rendered

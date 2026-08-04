@@ -256,6 +256,18 @@ PREAMBLE = (
     "is busy doing."
 )
 
+# Repeated on every line, which looks redundant against the preamble two lines
+# above and is not. On 3 August 2026 the coach quoted "Zwift Ride Test, 16:45 to
+# 17:15" out of this block as "today's session" — with the heading renamed, this
+# preamble present, the TODAY block carrying the plan, and the persona saying a
+# diary commitment is never a session it set. Four statements at the block level
+# and it still read one line and answered from it.
+#
+# So the caveat now sits in the same sentence as the thing being quoted, because
+# that is the unit a model lifts. Twenty entries at a handful of tokens each is
+# affordable inside MEM-11 and the alternative demonstrably was not.
+NOT_A_SESSION = "[his diary, not a session you set]"
+
 
 def context(conn: psycopg.Connection, today: date, tz: ZoneInfo, days: int = 7) -> str:
     """The week ahead, as the feed showed it. CALR-05 is the last line.
@@ -283,11 +295,11 @@ def context(conn: psycopg.Connection, today: date, tz: ZoneInfo, days: int = 7) 
     for block in blocks[:20]:
         when = block.local_date.strftime("%a %d %b")
         if block.all_day:
-            lines.append(f"- {when}: {block.summary or 'busy'} (all day)")
+            lines.append(f"- {when}: {block.summary or 'busy'} {NOT_A_SESSION} (all day)")
         else:
             start = block.starts_at.astimezone(tz).strftime("%H:%M")
             end = block.ends_at.astimezone(tz).strftime("%H:%M")
-            lines.append(f"- {when} {start}-{end}: {block.summary or 'busy'}")
+            lines.append(f"- {when} {start}-{end}: {block.summary or 'busy'} {NOT_A_SESSION}")
 
     lines.append(
         "This is what the feed published, which lags. Something added today may not "
