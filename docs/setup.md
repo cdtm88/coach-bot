@@ -72,6 +72,39 @@ Roughly 10 minutes
 * Get your numeric chat id by messaging the bot once and reading the update, then put it in .env as the allowlist.
 * Set the bot commands list later, once the tool surface is settled.
 
+#### Rotating the bot token
+
+Needed once already, on 5 August 2026, and the procedure is written down because
+the reason it was needed is the kind of thing that recurs. See open item 12.
+
+BotFather, `/mybots`, the bot, API Token, Revoke current token. Revocation is
+what matters and it is immediate: the old token stops working the moment the new
+one is issued, so anyone holding a copy loses it whether or not you have
+finished the rest of this.
+
+Then, on the deployment and **not** in the checkout — three directories there
+have a compose file and only one is the application, see
+`docs/deploy-existing-postgres.md`:
+
+```
+cd <the application project>
+# edit .env, replace TELEGRAM_BOT_TOKEN
+docker compose up -d --force-recreate agent scheduler
+```
+
+`agent` is the only service that polls, but `scheduler` sends the two daily
+messages and the weekly review through the same transport, so a restart that
+misses it leaves a process holding a revoked token and the athlete silently
+stops getting his morning message. Both, always.
+
+The chat id does not change and `TELEGRAM_ALLOWED_CHAT_ID` stays as it is. SEC-03
+is an inbound allowlist: it decides whose messages the coach will answer, and it
+has nothing to say about who can send *as* the bot. That is the token alone,
+which is why the token leaking is the whole of the exposure.
+
+Nothing in the database holds a token (SEC-01, CALR-06), so there is no
+migration and no cleanup pass. Rotation is BotFather, `.env`, and the restart.
+
 ### Step 5: Anthropic API
 
 Roughly 5 minutes

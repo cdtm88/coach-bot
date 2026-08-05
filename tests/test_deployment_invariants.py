@@ -9,6 +9,8 @@ a checkout with a chatty logger nobody reads, so both were invisible.
 from __future__ import annotations
 
 import logging
+import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -17,7 +19,18 @@ from coach import migrate
 from coach.llm import router
 from coach.runtime import transport
 
-TOKEN = "8225118233:AAExfPWg9QaI1nZByv3X7vKHEyDzeEwepsY"
+# SEC-01. This was the live bot token until 5 August 2026, committed here on
+# 2 August in #20 as a redaction fixture, in a public repository. It was scraped
+# and used to send spam into the athlete's chat three days later. That token is
+# burned and stays burned. What remains is the lesson that a fixture is not a
+# safe place for a real one, because nothing about this file's purpose made it
+# look like a secret store.
+#
+# The shape is what matters and the value never did: `_TOKEN_IN_URL` matches
+# `/bot\d{4,}:[A-Za-z0-9_-]{20,}`, so this exercises the redactor exactly as the
+# real one did. `test_no_real_credential_is_committed_to_this_repository` below
+# is the guard that keeps the next one out.
+TOKEN = "1234567890:AAnot-a-real-token-do-not-paste-a-real-one-here"
 
 
 def test_an_empty_migrations_directory_is_an_error(tmp_path: Path) -> None:
@@ -143,3 +156,87 @@ def test_every_routable_purpose_can_be_configured_from_the_deployment() -> None:
     ]
 
     assert not missing, f"not passed through to the containers: {missing}"
+
+
+# The credential shapes worth refusing. Each is anchored on a vendor prefix or a
+# fixed length rather than on entropy, because an entropy threshold over a
+# repository of prose and SQL is all false positives and gets deleted within a
+# week.
+_CREDENTIAL_SHAPES = {
+    "Telegram bot token": re.compile(r"\d{8,10}:[A-Za-z0-9_-]{35}"),
+    "Anthropic API key": re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}"),
+    "OpenAI-style key": re.compile(r"\bsk-[A-Za-z0-9]{32,}"),
+    "AWS access key id": re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    "GitHub token": re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36}\b"),
+    "private key block": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+    "password in a URI": re.compile(r"://[^/\s:@]+:(?!CHANGEME)[^/\s:@]{8,}@"),
+}
+
+# A fixture has to say it is one, inside the matched text itself. A real
+# credential cannot contain these, which is what makes the check one sided:
+# there is no way to silence it except by not committing the secret.
+#
+# `PASSWORD` and `YOUR` are here for the documented URI templates, which write
+# the shape out in full so the reader can see where the value goes. They are
+# safe markers for the same reason as the rest: an uppercase English word is not
+# what a generated secret looks like.
+_DECLARED_FAKE = (
+    "not-a-real",
+    "CHANGEME",
+    "REDACTED",
+    "example",
+    "EXAMPLE",
+    "placeholder",
+    "PASSWORD",
+    "YOUR",
+)
+
+
+def test_no_real_credential_is_committed_to_this_repository() -> None:
+    """SEC-01, as a test rather than as a rule nobody runs.
+
+    The rule already existed — `.gitignore` keeps `.env` out and the transport
+    goes to some length to keep the token out of a log line — and none of it
+    helped, because the token that leaked was pasted into a *test fixture* on
+    2 August 2026 and the repository is public. It was scraped and used to send
+    spam into the athlete's Telegram chat on 5 August. Every guard in the
+    codebase was pointed at the running system; nothing was pointed at the
+    checkout.
+
+    Scoped to `git ls-files`, so it asks the only question that matters — what
+    is actually published — rather than what happens to be on this disk. It
+    cannot see history: the 2 August token stays in the log of a public
+    repository forever, which is why the response to this was rotation and not
+    a rewrite.
+    """
+    root = Path(__file__).resolve().parents[1]
+    listed = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-z"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    tracked = [p for p in listed.stdout.split("\0") if p]
+    assert len(tracked) > 100, f"git ls-files returned {len(tracked)} paths, which is not this repo"
+
+    findings: list[str] = []
+    for relative in tracked:
+        path = root / relative
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue  # binary or gone; neither can be reviewed as text
+        for label, pattern in _CREDENTIAL_SHAPES.items():
+            for match in pattern.finditer(content):
+                hit = match.group(0)
+                if any(marker in hit for marker in _DECLARED_FAKE):
+                    continue
+                # `${POSTGRES_PASSWORD}` is the name of a secret, not one. This
+                # holds for every shape above, so it is checked once here rather
+                # than written into each pattern.
+                if "$" in hit:
+                    continue
+                line = content.count("\n", 0, match.start()) + 1
+                findings.append(f"{relative}:{line}: looks like a {label}")
+
+    assert not findings, "credential-shaped strings are tracked by git:\n" + "\n".join(findings)
